@@ -109,7 +109,7 @@ if ( -s $master_list )
 	{
 		my $count = `cat "$non_visible_callnums" | wc -l`;
 		chomp $count;
-		printf STDERR "%d titles with hold issues.\n", $count;
+		printf STDERR "%d call numbers that have hold issues.\n", $count;
 		$results = `cat "$non_visible_callnums"`;
 		print "$results";
 		unlink $non_visible_callnums;
