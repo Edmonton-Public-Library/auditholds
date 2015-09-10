@@ -5,7 +5,7 @@
 # Purpose:
 # Method:
 #
-#<one line to give the program's name and a brief idea of what it does.>
+# Produces a report of possible hold problems such as orphaned holds.
 #    Copyright (C) 2015  Andrew Nisbet
 #
 # This program is free software; you can redistribute it and/or modify
@@ -26,7 +26,7 @@
 # Author:  Andrew Nisbet, Edmonton Public Library
 # Created: Wed Sep 9 11:29:32 MDT 2015
 # Rev: 
-#          0.0 - Dev. 
+#          0.1 - Dev. 
 #
 ####################################################
 
@@ -42,7 +42,11 @@ use Getopt::Std;
 $ENV{'PATH'}  = qq{:/s/sirsi/Unicorn/Bincustom:/s/sirsi/Unicorn/Bin:/usr/bin:/usr/sbin};
 $ENV{'UPATH'} = qq{/s/sirsi/Unicorn/Config/upath};
 ###############################################
-my $VERSION    = qq{0.0};
+my $TEMP_DIR   = `getpathname tmp`;
+chomp $TEMP_DIR;
+my $TIME       = `date +%H%M%S`;
+chomp $TIME;
+my $VERSION    = qq{0.1};
 
 #
 # Message about this program and how to use it.
@@ -52,7 +56,9 @@ sub usage()
     print STDERR << "EOF";
 
 	usage: $0 [-x]
-Usage notes for auditholds.pl.
+This script reports problems with holds, specifically orphaned holds.
+An orphaned hold is one that exists on a call number that has no visible 
+item copies.
 
  -x: This (help) message.
 
@@ -60,6 +66,25 @@ example: $0 -x
 Version: $VERSION
 EOF
     exit;
+}
+
+# Writes data to a temp file and returns the name of the file with path.
+# param:  unique name of temp file, like master_list, or 'hold_keys'.
+# param:  data to write to file.
+# return: name of the file that contains the list.
+sub create_tmp_file( $$ )
+{
+	my $name    = shift;
+	my $results = shift;
+	my $master_file = "$TEMP_DIR/$name.$TIME";
+	open FH, ">$master_file" or die "*** error opening '$master_file', $!\n";
+	my @list = split '\n', $results;
+	foreach my $line ( @list )
+	{
+		print FH "$line\n";
+	}
+	close FH;
+	return $master_file;
 }
 
 # Kicks off the setting of various switches.
@@ -73,5 +98,31 @@ sub init
 }
 
 init();
-
+# Output all cat keys for titles with holds that have 2 or more distinct callnums. 
+my $results = `selhold -j"ACTIVE" -a"N" -t'T' -oN 2>/dev/null | sort | uniq | selcallnum -iN -oCD 2>/dev/null | pipe.pl -dc1 -A | pipe.pl -W"\\s+" -C'c0:ge2' -o'c1' | sort -n`;
+my $master_list = create_tmp_file( "cat_keys", $results );
+if ( -s $master_list )
+{
+	$results = `cat "$master_list" | selcatalog -iC -oCF 2>/dev/null | selcallnum -iC -oNDzS 2>/dev/null | pipe.pl -dc1 -o'c4,c2,c3' -C'c3:eq0' | pipe.pl -sc0 -dc1 -tc0`;
+	my $non_visible_callnums = create_tmp_file( "non_visible_callnums", $results );
+	if ( -s $non_visible_callnums )
+	{
+		my $count = `cat "$non_visible_callnums" | wc -l`;
+		chomp $count;
+		printf STDERR "%d titles with hold issues.\n", $count;
+		$results = `cat "$non_visible_callnums"`;
+		print "$results";
+		unlink $non_visible_callnums;
+	}
+	else
+	{
+		printf STDERR "No call numbers with 0 visible items found.\n";
+	}
+	unlink $master_list;
+}
+else
+{
+	printf STDERR "*** error creating temp file '$master_list'.\n";
+	exit 0;
+}
 # EOF
