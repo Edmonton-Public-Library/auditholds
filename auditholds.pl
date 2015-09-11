@@ -26,7 +26,7 @@
 # Author:  Andrew Nisbet, Edmonton Public Library
 # Created: Wed Sep 9 11:29:32 MDT 2015
 # Rev: 
-#          0.1 - Dev. 
+#          0.2 Sept. 11, 2015 - Improve reporting.
 #
 ####################################################
 
@@ -46,7 +46,12 @@ my $TEMP_DIR   = `getpathname tmp`;
 chomp $TEMP_DIR;
 my $TIME       = `date +%H%M%S`;
 chomp $TIME;
-my $VERSION    = qq{0.1};
+my $DATE       = `date +%m/%d/%Y`;
+chomp $DATE;
+my $VERSION    = qq{0.2};
+
+
+
 
 #
 # Message about this program and how to use it.
@@ -97,7 +102,37 @@ sub init
     usage() if ( $opt{'x'} );
 }
 
+# Formats and prints a report of findings.
+# param:  String header message.
+# param:  result string from API calls: 'TCN| call number | visible copies'.
+# return: <none>
+sub print_report( $$ )
+{
+	printf "\n";
+	printf "   Titles with problematic holds report, %s\n", $DATE;
+	printf "   %s\n", shift;
+	my $leader_tcn = `echo "TCN" | pipe.pl -p'c0:+12'`;
+	my $leader_cno = `echo "Call Number" | pipe.pl -p'c1:-32'`;
+	chomp $leader_tcn;
+	chomp $leader_cno;
+	printf "%s %s\n", $leader_tcn, $leader_cno;
+	printf "  -------------------------------------------------\n";
+	my @lines = split '\n', shift;
+	while ( @lines )
+	{
+		my $line = shift @lines;
+		my ( $tcn, $callnum ) = split '\|', $line;
+		format STDOUT =
+@>>>>>>>>>>> @<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+$tcn, $callnum
+.
+		write STDOUT;
+	}
+}
+
 init();
+
+
 # Output all cat keys for titles with holds that have 2 or more distinct callnums. 
 my $results = `selhold -j"ACTIVE" -a"N" -t'T' -oN 2>/dev/null | sort | uniq | selcallnum -iN -oCD 2>/dev/null | pipe.pl -dc1 -A | pipe.pl -W"\\s+" -C'c0:ge2' -o'c1' | sort -n`;
 my $master_list = create_tmp_file( "cat_keys", $results );
@@ -109,9 +144,9 @@ if ( -s $master_list )
 	{
 		my $count = `cat "$non_visible_callnums" | wc -l`;
 		chomp $count;
-		printf STDERR "%d call numbers that have hold issues.\n", $count;
+		my $header = sprintf "%d call numbers with hold issues.", $count;
 		$results = `cat "$non_visible_callnums"`;
-		print "$results";
+		print_report( $header, $results );
 		unlink $non_visible_callnums;
 	}
 	else
