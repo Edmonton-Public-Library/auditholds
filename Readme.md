@@ -116,7 +116,13 @@ Shows an example of a problem. There are 37 holds that has 0 visible callnums.
 1 1440094|2|Beginning chapter books - Series G PBK|1|
 ```
 
-
+Considerations: call numbers with no items
+------------------------------------------
+API to remove a call number:
+```
+E201509171212240004R ^S96FVFFADMIN^FEEPLMNA^FcNONE^FWADMIN^IQJ 220.95 MACK(1235545.1)^IS1^NOY^tJ1235545^IULSC2606964^IKMARC^aA(OCoLC)843784993^IF2014^Fv3000000^^O
+```
+Required fields: IQ - call number (selcallnum -oD), tJ - cat key, IU - flex key.
 
 Repository Information:
 -----------------------

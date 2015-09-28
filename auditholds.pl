@@ -26,7 +26,7 @@
 # Author:  Andrew Nisbet, Edmonton Public Library
 # Created: Wed Sep 9 11:29:32 MDT 2015
 # Rev: 
-#          0.2 Sept. 11, 2015 - Improve reporting.
+#          0.3 Sept. 11, 2015 - Improve reporting.
 #
 ####################################################
 
@@ -48,7 +48,7 @@ my $TIME       = `date +%H%M%S`;
 chomp $TIME;
 my $DATE       = `date +%m/%d/%Y`;
 chomp $DATE;
-my $VERSION    = qq{0.2};
+my $VERSION    = qq{0.3};
 
 
 
@@ -134,7 +134,7 @@ init();
 
 
 # Output all cat keys for titles with holds that have 2 or more distinct callnums. 
-my $results = `selhold -j"ACTIVE" -a"N" -t'T' -oN 2>/dev/null | sort | uniq | selcallnum -iN -oCD 2>/dev/null | pipe.pl -dc1 -A | pipe.pl -W"\\s+" -C'c0:ge2' -o'c1' | sort -n`;
+my $results = `selhold -j"ACTIVE" -a"N" -t'T' -oN 2>/dev/null | sort | uniq | selcallnum -iN -oCD 2>/dev/null | pipe.pl -dc1 -A | pipe.pl -W"\\s+" -C'c0:ge2' -o'c1' -s'c1'`;
 my $master_list = create_tmp_file( "cat_keys", $results );
 if ( -s $master_list )
 {
