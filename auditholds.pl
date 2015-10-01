@@ -26,7 +26,7 @@
 # Author:  Andrew Nisbet, Edmonton Public Library
 # Created: Wed Sep 9 11:29:32 MDT 2015
 # Rev: 
-#          0.3 Sept. 11, 2015 - Improve reporting.
+#          0.5 Sept. 11, 2015 - Modularize reporting.
 #
 ####################################################
 
@@ -42,16 +42,20 @@ use Getopt::Std;
 $ENV{'PATH'}  = qq{:/s/sirsi/Unicorn/Bincustom:/s/sirsi/Unicorn/Bin:/usr/bin:/usr/sbin};
 $ENV{'UPATH'} = qq{/s/sirsi/Unicorn/Config/upath};
 ###############################################
-my $TEMP_DIR   = `getpathname tmp`;
+my $TEMP_DIR           = `getpathname tmp`;
 chomp $TEMP_DIR;
-my $TIME       = `date +%H%M%S`;
+my $TIME               = `date +%H%M%S`;
 chomp $TIME;
-my $DATE       = `date +%m/%d/%Y`;
+my $DATE               = `date +%m/%d/%Y`;
 chomp $DATE;
-my $VERSION    = qq{0.4};
+my @CLEAN_UP_FILE_LIST = (); # List of file names that will be deleted at the end of the script if ! '-t'.
+my $BINCUSTOM          = `getpathname bincustom`;
+chomp $BINCUSTOM;
+my $PIPE               = "$BINCUSTOM/pipe.pl";
+my $VERSION            = qq{0.4};
 
-
-
+# Algorithm: 
+# 
 
 #
 # Message about this program and how to use it.
@@ -65,11 +69,11 @@ This script reports problems with holds, specifically orphaned holds.
 An orphaned hold is one that exists on a call number that has no visible 
 item copies.
 
+ -c: Ignore titles with only copy level holds.
  -e: Print exhaustive report, that is, all multi-callnum titles with holds
      and multi-callnum titles with holds with callnums with no visible copies.
  -t: Test script. Doesn't remove temporary files so they can be reviewed.
- -v: Ignore obvious volume situations, that is, drop titles that contain
-     callnums related to volumes.
+ -v: Ignore titles that contain callnums related to volumes.
  -x: This (help) message.
 
 example: $0 -x
@@ -94,6 +98,8 @@ sub create_tmp_file( $$ )
 		print FH "$line\n";
 	}
 	close FH;
+	# Add it to the list of files to clean if required at the end.
+	push @CLEAN_UP_FILE_LIST, $master_file;
 	return $master_file;
 }
 
@@ -105,6 +111,11 @@ sub init
     my $opt_string = 'etvx';
     getopts( "$opt_string", \%opt ) or usage();
     usage() if ( $opt{'x'} );
+	if ( ! -s $PIPE )
+	{
+		printf STDERR "*** error, required application '%s' not found.\n", $PIPE;
+		exit 0;
+	}
     printf STDERR "Test mode active. Temp files will not be deleted. Please clean up '%s' when done.\n", $TEMP_DIR if ( $opt{'t'} );
 }
 
@@ -115,7 +126,9 @@ sub is_multi_volume_title( $ )
 {
 	my $line = shift;
 	return 1 if ( $line =~ m/\s+(19|20)\d{2}$/ ); # lines for multivolume sets typically end with a year.
-	return 1 if ( $line =~ m/\s+(v|V|bk|BK)\.\d{1,}$/ ); # lines for multivolume sets typically end with v.##.
+	return 1 if ( $line =~ m/\s+(v|V|bk|BK)\.\d{1,}/ ); # lines for multivolume sets typically end with v.##.
+	return 1 if ( $line =~ m/\s+(p|P)(t|T)(s|S)?\.\d{1,}/ ); # lines for multivolume sets typically end with pt.##.
+	return 1 if ( $line =~ m/\s+(k|K)(i|I)(t|T)\.\d{1,}/ ); # lines for multivolume kits end with pt.##.
 	return 0;
 }
 
@@ -128,8 +141,8 @@ sub print_report( $$ )
 	printf "\n";
 	printf "   Titles with problematic holds report, %s\n", $DATE;
 	printf "   %s\n", shift;
-	my $leader_tcn = `echo "TCN" | pipe.pl -p'c0:+12'`;
-	my $leader_cno = `echo "Call Number" | pipe.pl -p'c1:-32'`;
+	my $leader_tcn = `echo "TCN" | "$PIPE" -p'c0:+12'`;
+	my $leader_cno = `echo "Call Number" | "$PIPE" -p'c1:-32'`;
 	chomp $leader_tcn;
 	chomp $leader_cno;
 	printf "%s %s\n", $leader_tcn, $leader_cno;
@@ -138,7 +151,8 @@ sub print_report( $$ )
 	while ( @lines )
 	{
 		my $line = shift @lines;
-		next if ( is_multi_volume_title( $line ) and $opt{'v'} );
+		# This deselects an individual item, but not the entire set. If one member fails the entire title should be discarded.
+		# next if ( is_multi_volume_title( $line ) and $opt{'v'} );
 		my ( $tcn, $callnum ) = split '\|', $line;
 		format STDOUT =
 @>>>>>>>>>>> @<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -148,6 +162,40 @@ $tcn, $callnum
 	}
 }
 
+# Removes all the temp files created during running of the script.
+# param:  List of all the file names to clean up.
+# return: <none>
+sub clean_up
+{
+	foreach my $file ( @CLEAN_UP_FILE_LIST )
+	{
+		if ( $opt{'t'} )
+		{
+			printf STDERR "preserving file '%s' for review.\n", $file;
+		}
+		else
+		{
+			if ( -e $file )
+			{
+				printf STDERR "removing '%s'.\n", $file;
+				unlink $file;
+			}
+			else
+			{
+				printf STDERR "** Warning: file '%s' not found.\n", $file;
+			}
+		}
+	}
+}
+
+# Creates a new list of candidate callnums after removing titles whose only variation of callnum is ON-ORDER.
+# param:  
+# return: string path of the file that contains the cat keys of titles whose only variation on callnum is ON-ORDER.
+sub remove_on_order_callnums( $ )
+{
+	return "";
+}
+
 init();
 
 # This is a description of the following selection broken down by pipe boundary.
@@ -155,66 +203,46 @@ init();
 # sort the keys.
 # unique the keys.
 # select from the CALLNUM table all the entries based on supplied cat keys and output the callnum key, callnum, and visible items.
-my $results = `selhold -j"ACTIVE" -a'N' -oC 2>/dev/null | sort | uniq | selcallnum -iC -oNDz 2>/dev/null`;
+my $results = `selhold -j"ACTIVE" -a'N' -oCt 2>/dev/null | "$PIPE" -d'c0' | selcallnum -iC -oNDzS 2>/dev/null`;
+# Produces:
+# 999714|1|ON ORDER|0|T|
+# 999714|12|TEEN SHU v.4|0|T|
+# 999714|28|TEEN SHU v.4|1|T|
+# 999714|31|TEEN SHU v.4|1|T|
+# 999714|35|TEEN SHU v.4|1|T|
+# 999714|36|TEEN SHU v.4|1|T|
+# 999714|37|TEEN SHU v.4|1|T|
+# 999714|38|TEEN SHU v.4|1|T|
 my $master_list = create_tmp_file( "audithold_callnum_keys", $results );
 # So now we have all the callnum keys, callnums, and visible items.
 # This is a description of the following selection broken down by pipe boundary.
-# cat the list of call nums which looks like '997099|38|Teen fiction - Series H PBK|0|'
+# cat the list of call nums which looks like '997099|38|Teen fiction - Series H PBK|0|T|'
 # Take input into pipe.pl and dedup on the callnum and cat key in that order. This gives a list of cat keys and unique callnumbers.
 # Use the results and sort by cat key and callnum, then dedup again this time on cat key and output a count of dedups delimited by a '|'.
 # Take that output and only display the lines that have a count greater than one, that is, output the cat keys that have more than
 # 1 different callnumbers.
-$results = `cat "$master_list" | pipe.pl -d'c2,c0' | pipe.pl -s'c1,c3' -d'c0' -A -P | pipe.pl -C'c0:gt1' -o'c1'`;
+$results = `cat "$master_list" | "$PIPE" -d'c2,c0' | "$PIPE" -s'c1,c3' -d'c0' -A -P | "$PIPE" -C'c0:gt1' -o'c1'`;
 my $cat_key_list = create_tmp_file( "audithold_cat_keys", $results );
-# Tidy up the master list, if there is one.
-unlink $master_list if ( -s $master_list and ! $opt{'t'} );
 if ( -s $cat_key_list )
 {
-	# This is a description of the following selection broken down by pipe boundary.
-	# cat the list of cat keys selected above.
-	# select from CALLNUM all cat keys, output call number key, call number, and count of visible items under the callnum.
-	# 999466|85|TEEN LOR|1|
-	# 999466|84|Teen fiction - Series I PBK|1|
-	# 999524|145|TEEN SAE|1|
-	# 999524|53|Teen fiction S|vPBK|0|
-	# 999524|147|Teen fiction S PBK|1|
-	# 999407|59|DVD 617.58204 BOW|1|
-	# 999407|55|DVD NOT AVAILABLE|0|
-	$results = `cat "$cat_key_list" | selcallnum -iC -oNDz 2>/dev/null | pipe.pl  -d'c0,c2' | pipe.pl -s'c0'`;
-	my $candidate_callnums = create_tmp_file( "audithold_candidate_callnums", $results );
-	if ( -s $candidate_callnums )
-	{
-		my $count = `cat "$cat_key_list" | wc -l | pipe.pl -t'c0'`;
-		chomp $count;
-		my $header = sprintf "%d multi-callnum titles with holds.", $count;
-		# The first report will output all titles with holds that have multiple callnums.
-		$results = `cat "$candidate_callnums" | selcatalog -iC -oFS 2>/dev/null | pipe.pl -t'c0' -o'c0,c2' -s'c0'`;
-		print_report( $header, $results ) if ( $opt{'e'} );
-		# else just print the report of those titles with call nums with no visible items.
-		my $zero_count = `cat "$candidate_callnums" | pipe.pl -C'c3:eq0' | wc -l | pipe.pl -t'c0'`;
-		chomp $zero_count;
-		$header = sprintf "%d multi-callnum titles with hold, %d with 0 visible copies.", $count, $zero_count;
-		# This is a description of the following selection broken down by pipe boundary.
-		# cat the list of cat keys selected above.
-		# select from CATALOG from input of cat keys, output the TCN and `o785243323        |55|DVD NOT AVAILABLE|0|`.
-		# take the input trim the flex key, output flex key and callnum if the number of visible items under callnum is 0.
-		$results = `cat "$candidate_callnums" | selcatalog -iC -oFS 2>/dev/null | pipe.pl -t'c0' -o'c0,c2' -C'c3:eq0' -s'c0'`;
-		print_report( $header, $results );
-		# Now I want to see a list of all the titles, with the different call numbers under it.
-		$results = `cat "$cat_key_list" | selcatalog -iC -oCF 2>/dev/null | selcallnum -iC -oSD 2>/dev/null | pipe.pl -t'c0' -d'c1,c0' | pipe.pl -s'c0'`;
-		print_report( "", $results );
-		# Tidy up the master list, if there is one.
-		unlink $cat_key_list if ( -s $cat_key_list and ! $opt{'t'} );
-		unlink $candidate_callnums if ( -s $candidate_callnums and ! $opt{'t'} );
-	}
-	else
-	{
-		printf STDERR "No call numbers with 0 visible items found.\n";
-	}
-}
-else
-{
 	printf STDERR "No problems detected.\n";
+	clean_up();
 	exit 0;
 }
+
+# This is a description of the following selection broken down by pipe boundary.
+# cat the list of cat keys selected above.
+# select from CALLNUM all cat keys, output call number key, call number, and count of visible items under the callnum.
+# 999466|85|TEEN LOR|1|
+# 999466|84|Teen fiction - Series I PBK|1|
+# 999524|145|TEEN SAE|1|
+# 999524|53|Teen fiction S|vPBK|0|
+# 999524|147|Teen fiction S PBK|1|
+# 999407|59|DVD 617.58204 BOW|1|
+# 999407|55|DVD NOT AVAILABLE|0|
+# $results = `cat "$cat_key_list" | selcallnum -iC -oNDz 2>/dev/null | pipe.pl  -d'c0,c2' | pipe.pl -s'c0'`;
+# my $candidate_callnums = create_tmp_file( "audithold_candidate_callnums", $results );
+# my $titles_no_orders = remove_on_order_callnums( $candidate_callnums );
+# $titles_of_interest = remove_multi_volume_titles( $titles_of_interest ) if ( $opt{'v'} );
+clean_up();
 # EOF
