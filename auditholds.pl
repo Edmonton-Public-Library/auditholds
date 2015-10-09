@@ -26,7 +26,7 @@
 # Author:  Andrew Nisbet, Edmonton Public Library
 # Created: Wed Sep 9 11:29:32 MDT 2015
 # Rev: 
-#          0.5 Sept. 11, 2015 - Modularize reporting.
+#          0.5.06 Oct. 7, 2015 - Modularize reporting.
 #
 #######################################################################
 
@@ -55,7 +55,7 @@ my @CLEAN_UP_FILE_LIST = (); # List of file names that will be deleted at the en
 my $BINCUSTOM          = `getpathname bincustom`;
 chomp $BINCUSTOM;
 my $PIPE               = "$BINCUSTOM/pipe.pl";
-my $VERSION            = qq{0.5.05};
+my $VERSION            = qq{0.5.06};
 
 #
 # Message about this program and how to use it.
@@ -300,7 +300,7 @@ sub report_data( $ )
 	# We receive a list of call nums with zero visible items, let's flush out the list so we can see all the callnums.
 	# 1005622|1|1|1005622-1001    |DISCARD|ON ORDER|a1005622
 	my $results = `cat "$seed_file" | "$PIPE" -s'c0' | "$PIPE" -o'c6,c3,c5'`;
-	my $new_parred_list = create_tmp_file( "audithold_07a_uniq_callnums", $results );
+	my $new_parred_list = create_tmp_file( "audithold_07a_report_data", $results );
 	my $count = `cat "$new_parred_list" | wc -l | "$PIPE" -W'\\s+' -o'c0'`;
 	my $msg = sprintf "Possible problematic titles: %d.", $count;
 	print_report( $msg, $results );
@@ -348,14 +348,14 @@ sub distill_problem_holds( $ )
 	{
 		# We take the cat key, sequence, and copy number and get a count.
 		my ($c_key, $seq, $copy) = split '\|', $_;
-		my $item_hold_count = `echo 'select count(CATALOG_KEY) from HOLD where CATALOG_KEY=$c_key and CALL_SEQUENCE=$seq and COPY_NUMBER=$copy;' | sirsisql 2>/dev/null | "$PIPE" -t'c0'`;
+		my $item_hold_count = `echo 'select count(CATALOG_KEY) from HOLD where CATALOG_KEY=$c_key and CALL_SEQUENCE=$seq and COPY_NUMBER=$copy and ITEM_AVAILABLE="N" and HOLD_STATUS IN (1);' | sirsisql 2>/dev/null | "$PIPE" -t'c0'`;
 		chomp $item_hold_count;
 		# Sirsisql returns nothing if the query fails.
 		$item_hold_count = 0 if ( ! $item_hold_count);
 		# Then we take the cat key and take a count of holds.
-		my $title_hold_count = `echo 'select count(CATALOG_KEY) from HOLD where CATALOG_KEY=$c_key;' | sirsisql 2>/dev/null | "$PIPE" -t'c0'`;
+		my $title_hold_count = `echo 'select count(CATALOG_KEY) from HOLD where CATALOG_KEY=$c_key and ITEM_AVAILABLE="N" and HOLD_STATUS IN (1);' | sirsisql 2>/dev/null | "$PIPE" -t'c0'`;
 		chomp $title_hold_count;
-		$title_hold_count = 0 if ( ! $title_hold_count);
+		$title_hold_count = 0 if ( ! $title_hold_count );
 		# Compare the two numbers and if they don't match this is a positive hit.
 		if ( $item_hold_count != $title_hold_count )
 		{
