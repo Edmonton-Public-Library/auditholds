@@ -181,7 +181,7 @@ sub print_report( $$ )
 	printf "  -------------------------------------------------\n";
 	my $file = shift;
 	# Get rid of the initial call num for output, 
-	my $results = `cat "$file" | "$PIPE" -o'c0,c2' | "$PIPE" -s'c0' | selcatalog -iC -oFS 2>/dev/null`;
+	my $results = `cat "$file" | "$PIPE" -o'c0,c2' | selcatalog -iC -oFS 2>/dev/null | "$PIPE" -s'c0'`;
 	my @lines = split '\n', $results;
 	while ( @lines )
 	{
@@ -218,7 +218,7 @@ sub init
 		# 1000047|43|Easy readers T PBK|0|
 		# 1000051|11|Easy readers L TradePBK|0|
 		# We need to get titles with more than 1 hold, with zero visible items under a call number.
-		$results = `cat "$cat_keys" | pipe.pl -g'c2:PBK' -d'c2,c0' | "$PIPE" -s'c0'`;
+		$results = `cat "$cat_keys" | "$PIPE" -g'c2:PBK' -d'c2,c0'`;
 		my $format_callnum_keys = create_tmp_file( "audithold_f01", $results );
 		report_file_counts( "Holds stuck on format", $format_callnum_keys );
 		print_report( "Holds stuck on item format report", $format_callnum_keys ) if ( $opt{'V'} );
@@ -233,7 +233,6 @@ sub init
 		my $hold_title_counts = create_tmp_file( "audithold_o01", $results );
 		# This will select all the items under a cat key with holds and count the holds on each item.
 		# 1413866|1|
-		# echo 1413866 | selhold -iC -a'N' -t'T' -j"ACTIVE" -oI 2>/dev/null | pipe.pl -d'c0,c1,c2' -A -P | pipe.pl -o'c1,c2,c3,c0'
 		$results = `cat "$cat_keys" | selhold -iC -a'N' -t'T' -j"ACTIVE" -oI 2>/dev/null | "$PIPE" -d'c0' -A -P | "$PIPE" -o'c1,c0' -P`;
 		my $hold_item_counts = create_tmp_file( "audithold_o02", $results );
 		# Now diff the two files and merge the hold counts.
