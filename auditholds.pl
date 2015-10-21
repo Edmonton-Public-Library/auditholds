@@ -159,11 +159,11 @@ sub report_file_counts( $$ )
 	my $file  = shift;
 	if ( -e $file )
 	{
-		printf STDERR "\n%s: error(s) detected: %d\n", $title, count_lines( $file );
+		printf "\n%s: error(s) detected: %d\n", $title, count_lines( $file );
 	}
 	else
 	{
-		printf STDERR "\n%s: no errors detected.\n", $title;
+		printf "\n%s: no errors detected.\n", $title;
 	}
 }
 
