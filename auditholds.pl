@@ -26,8 +26,15 @@
 # Author:  Andrew Nisbet, Edmonton Public Library
 # Created: Wed Sep 9 11:29:32 MDT 2015
 # Rev: 
+#          0.6.v Oct. 22, 2015 - Fixed error reading empty file if no orphaned holds found.
 #          0.6.u Oct. 20, 2015 - reporting.
 #          0.6.t Oct. 9, 2015 - Re-factored audit orphaned holds.
+# TODO:    Fix message below.
+# bash-3.2$ ./auditholds.pl -oV
+# Orphaned holds: no errors detected.
+#    Orphaned holds report, 11/06/2015
+#   -------------------------------------------------
+# cat: cannot open /tmp/audithold_o03.144156
 #
 #######################################################################
 
@@ -57,7 +64,7 @@ my $BINCUSTOM          = `getpathname bincustom`;
 chomp $BINCUSTOM;
 my $PIPE               = "$BINCUSTOM/pipe.pl";
 my $DIFF               = "$BINCUSTOM/diff.pl";
-my $VERSION            = qq{0.6.u};
+my $VERSION            = qq{0.6.v};
 
 #
 # Message about this program and how to use it.
@@ -208,6 +215,8 @@ sub init
 		printf STDERR "*** error, required application '%s' not found.\n", $PIPE;
 		exit 0;
 	}
+	# TODO: fix to account for the differences between the two item types. You are looking for call numbs where 
+	# all of the items under a call num range have 0 visible copies.
 	if ( $opt{'f'} )
 	{
 		# Select all the titles from the hold table that have call numbers with zero visible items.
@@ -223,22 +232,29 @@ sub init
 		report_file_counts( "Holds stuck on format", $format_callnum_keys );
 		print_report( "Holds stuck on item format report", $format_callnum_keys ) if ( $opt{'V'} );
 	}
+	# Orphaned holds; holds for titles that are not multi-volume titles, but have callnumbers with variances in holds counts relative to the title.
 	if ( $opt{'o'} )
 	{
 		my $results = `selhold -j"ACTIVE" -a'N' -t'T' -oC 2>/dev/null | "$PIPE" -d'c0' | selcallnum -iC -z"=0" -oC 2>/dev/null | "$PIPE" -d'c0'`;
 		my $cat_keys = create_tmp_file( "audithold_o00", $results );
-		# To get the holds on a title do this:
-		# 1413866|3|
-		$results = `cat "$cat_keys" | selcatalog -iC -oCh 2>/dev/null`;
-		my $hold_title_counts = create_tmp_file( "audithold_o01", $results );
-		# This will select all the items under a cat key with holds and count the holds on each item.
-		# 1413866|1|
-		$results = `cat "$cat_keys" | selhold -iC -a'N' -t'T' -j"ACTIVE" -oI 2>/dev/null | "$PIPE" -d'c0' -A -P | "$PIPE" -o'c1,c0' -P`;
-		my $hold_item_counts = create_tmp_file( "audithold_o02", $results );
-		# Now diff the two files and merge the hold counts.
-		$results = `echo "$hold_title_counts not $hold_item_counts" | "$DIFF" -e'c0,c1' -f'c0,c1'`;
-		my $differences = create_tmp_file( "audithold_o03", $results );
-		# Now weed out the items that are intransit, they create a false positive result.
+		my $differences = '';
+		# Test if the file exists because sometimes theres just aren't any orphaned holds.
+		if ( -s $cat_keys )
+		{
+			# To get the holds on a title do this:
+			# 1413866|3|
+			$results = `cat "$cat_keys" | selcatalog -iC -oCh 2>/dev/null`;
+			my $hold_title_counts = create_tmp_file( "audithold_o01", $results );
+			# This will select all the items under a cat key with holds and count the holds on each item.
+			# 1413866|1|
+			$results = `cat "$cat_keys" | selhold -iC -a'N' -t'T' -j"ACTIVE" -oI 2>/dev/null | "$PIPE" -d'c0' -A -P | "$PIPE" -o'c1,c0' -P`;
+			my $hold_item_counts = create_tmp_file( "audithold_o02", $results );
+			# Now diff the two files and merge the hold counts.
+			$results = `echo "$hold_title_counts not $hold_item_counts" | "$DIFF" -e'c0,c1' -f'c0,c1'`;
+		}
+		$differences = create_tmp_file( "audithold_o03", $results );
+		# Now weed out the items that are intransit, they create a false positive result.# But we don't want in transit items because they produce false positives.
+		# selitem -iI -m"~INTRANSIT" -oI 2>/dev/null |
 		report_file_counts( "Orphaned holds", $differences );
 		print_report( "Orphaned holds report", $differences ) if ( $opt{'V'} );
 	}
