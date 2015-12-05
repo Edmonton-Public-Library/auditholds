@@ -26,6 +26,7 @@
 # Author:  Andrew Nisbet, Edmonton Public Library
 # Created: Wed Sep 9 11:29:32 MDT 2015
 # Rev: 
+#          0.6.w Dec. 03, 2015 - Add further refinement and output of discarded items with holds.
 #          0.6.v Oct. 22, 2015 - Fixed error reading empty file if no orphaned holds found.
 #          0.6.u Oct. 20, 2015 - reporting.
 #          0.6.t Oct. 9, 2015 - Re-factored audit orphaned holds.
@@ -64,7 +65,7 @@ my $BINCUSTOM          = `getpathname bincustom`;
 chomp $BINCUSTOM;
 my $PIPE               = "$BINCUSTOM/pipe.pl";
 my $DIFF               = "$BINCUSTOM/diff.pl";
-my $VERSION            = qq{0.6.v};
+my $VERSION            = qq{0.6.w};
 
 #
 # Message about this program and how to use it.
@@ -73,7 +74,7 @@ sub usage()
 {
     print STDERR << "EOF";
 
-	usage: $0 [-fotvx]
+	usage: $0 [-fiotvx]
 This script reports that detail problems with multi-volume titles with holds on non-visible items,
 stalled holds on format variations, and orphaned holds. Orphaned holds are holds that are stuck on
 a non-visible item in a call number range that differs from the rest of the title. These holds stall
@@ -81,13 +82,21 @@ while other customers continue to advance in hold ranking. In extreme cases staf
 are items in stacks but dozens of holds in the queue.
 
  -f: Produce report of holds stalled on titles because of variation of format PBK vs. TRADE-PBK etc.
+ -i: Break out items of concern.
  -o: Produce report of titles with orphaned holds.
  -t: Test mode. Doesn't remove any temporary files so you can debug stages of selection.
  -v: Produce report of holds stalled on titles because the title have volumes that have no visible items.
  -V: Verbose reporting. Reports complete item information, otherwise just counts are reported.
  -x: This (help) message.
 
-example: $0 -x
+example: 
+ $0 -x
+Give counts of problems on titles with volumes.
+ $0 -v
+Give counts of problems on titles with volumes, but report all the call nums.
+ $0 -vV
+Report potential orphan holds, show call nums, and items that are problematic.
+ $0 -oVi
 Version: $VERSION
 EOF
     exit;
@@ -156,6 +165,94 @@ sub count_lines( $ )
 	return $count;
 }
 
+# Creates a hash reference of the pipe delimited data read from a file.
+# param:  String name of fully qualified path to the file where data will be read from.
+# param:  List reference of integer that are the 0 based indexes to the columns that make up the key to an entry.
+#         The key will be made from only existing columns. If no indexes are selected the function issues
+#         an error message and then returns an empty hash reference.
+# param:  List reference of integers that are the 0 based indexes to the columns that make up the value to an entry.
+#         If the list is empty the value '1' is stored as a default value and a warning message is issued.
+# return: Reference to the hash created by the process which will be empty if anything fails.
+sub create_hash_table_ref( $$$ )
+{
+	my $hash_ref = {};
+	my $file     = shift;
+	my $indexes  = shift;
+	my $values   = shift;
+	if ( ! -s $file )
+	{
+		printf STDERR "** error can't make hash table from missing or empty file '%s'!\n", $file;
+		return $hash_ref;
+	}
+	if ( ! scalar @{$indexes} )
+	{
+		printf STDERR "** error no indexes defined for hash key\n", $file;
+		return $hash_ref;
+	}
+	if ( ! scalar @{$values} )
+	{
+		printf STDERR "* warning no values defined setting values to default of 1.\n", $file;
+	}
+	open IN, "<$file" or die "** error opening $file, $!\n";
+	while (<IN>)
+	{
+		my $line = $_;
+		chomp $line;
+		my @cols = split '\|', $line;
+		my $key = '';
+		my $value = '';
+		foreach my $index ( @{$indexes} )
+		{
+			$key .= $cols[ $index ] . "|" if ( $cols[ $index ] );
+		}
+		foreach my $index ( @{$values} )
+		{
+			$value .= $cols[ $index ] . "|" if ( $cols[ $index ] );
+		}
+		$value = "1" if ( ! $value );
+		$hash_ref->{"$key"} = "$value" if ( $key );
+	}
+	close IN;
+	return $hash_ref;
+}
+
+# Takes all the unique keys and adds them all into a list reference that.
+# Given a hash ref like:
+# hash_ref{'111'} = 'abc'
+# hash_ref{'222'} = 'abc'
+# hash_ref{'333'} = 'abc'
+# Create a new hash that looks like
+# hash_ref_prime{'abc'} =  ('111', '222', '333')
+# param:  hash reference of keys and values.
+# return: values as keys, with (previous) keys as a list of values.
+sub enlist_values( $ )
+{
+	my $hash_in = shift;
+	my $hash_out= {};
+	foreach my $key ( keys %$hash_in )
+	{
+		my $ass_value = ();
+		my $new_key   = $hash_in->{"$key"};
+		printf STDERR " ===== '%s'\n", $new_key;
+		if ( exists $hash_out->{$new_key} )
+		{
+			$ass_value = $hash_out->{$new_key}; # This becomes the new key and the value is the array of items 
+		}
+		push @{ $ass_value }, $key;
+		printf STDERR "  pushed  '%s' into '%s'\n", $key, $new_key;
+		# $hash_out->{$new_key} = $ass_value;
+	}
+	foreach ( my ($k, $v) = each %$hash_out )
+	{
+		printf STDERR "key: '%s'\n", $k;
+		foreach my $value ( @{$v} )
+		{
+			printf STDERR " +- '%s'\n", $value;
+		}
+	}
+	return $hash_out;
+}
+
 # Reports counts for each files.
 # param:  title string of the file contents.
 # param:  name of the file.
@@ -164,9 +261,9 @@ sub report_file_counts( $$ )
 {
 	my $title = shift;
 	my $file  = shift;
-	if ( -e $file )
+	if ( -s $file )
 	{
-		printf "\n%s: error(s) detected: %d\n", $title, count_lines( $file );
+		printf "\n%s: initial error(s) detected: %d\n", $title, count_lines( $file );
 	}
 	else
 	{
@@ -174,31 +271,33 @@ sub report_file_counts( $$ )
 	}
 }
 
-# Formats and prints a report of findings.
+# Formats and prints a report of findings, TCN CallNum and optional items.
 # param:  String header message.
 # param:  result string from API calls. Consumes data like:
-#     '1000216|46|Video Game Not Available|0|'
-#     Outputs: flex key | call num.
-#     'o754964597|DVD 782.42166 PEA PEA'
+#     '1000066|36|Picture books D PBK|0|epl000001956|31221101011349|DISCARD'
+#     Outputs: flex key | call num and optional IDs if -i selected.
+# param:  Hash reference of items with callnum key values i.e.: '1000216|46|'.
 # return: <none>
-sub print_report( $$ )
+sub print_report( $$$ )
 {
 	printf "\n";
 	printf "   %s, %s\n", shift, $DATE;
 	printf "  -------------------------------------------------\n";
 	my $file = shift;
+	if ( ! -s $file )
+	{
+		printf STDERR "no problems found.\n";
+		return;
+	}
+	my $items= shift;
 	# Get rid of the initial call num for output, 
-	my $results = `cat "$file" | "$PIPE" -o'c0,c2' | selcatalog -iC -oFS 2>/dev/null | "$PIPE" -s'c0'`;
+	my $results = `cat "$file" | "$PIPE" -g'c6:DISCARD' -o'c4,c2,c5,c6' | "$PIPE" -s'c0'`;
 	my @lines = split '\n', $results;
 	while ( @lines )
 	{
 		my $line = shift @lines;
-		my ( $tcn, $callnum ) = split '\|', $line;
-		format STDOUT =
-@>>>>>>>>>>> @<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-$tcn, $callnum
-.
-		write STDOUT;
+		my ( $tcn, $callnum, $item, $location ) = split '\|', $line;
+		printf "%11s %32s %14s, %10s\n", $tcn, $callnum, $item, $location;
 	}
 }
 
@@ -207,7 +306,7 @@ $tcn, $callnum
 # return: 
 sub init
 {
-	my $opt_string = 'fotvVx';
+	my $opt_string = 'fiotvVx';
 	getopts( "$opt_string", \%opt ) or usage();
 	usage() if ( $opt{'x'} );
 	if ( ! -s $PIPE )
@@ -230,7 +329,7 @@ sub init
 		$results = `cat "$cat_keys" | "$PIPE" -g'c2:PBK' -d'c2,c0'`;
 		my $format_callnum_keys = create_tmp_file( "audithold_f01", $results );
 		report_file_counts( "Holds stuck on format", $format_callnum_keys );
-		print_report( "Holds stuck on item format report", $format_callnum_keys ) if ( $opt{'V'} );
+		print_report( "Holds stuck on item format report", $format_callnum_keys, "" ) if ( $opt{'V'} );
 	}
 	# Orphaned holds; holds for titles that are not multi-volume titles, but have callnumbers with variances in holds counts relative to the title.
 	if ( $opt{'o'} )
@@ -256,45 +355,80 @@ sub init
 		# Now weed out the items that are intransit, they create a false positive result.# But we don't want in transit items because they produce false positives.
 		# selitem -iI -m"~INTRANSIT" -oI 2>/dev/null |
 		report_file_counts( "Orphaned holds", $differences );
-		print_report( "Orphaned holds report", $differences ) if ( $opt{'V'} );
+		print_report( "Orphaned holds report", $differences, "" ) if ( $opt{'V'} );
 	}
 	if ( $opt{'v'} )
 	{
+		my $hash_ref = {};
+		$hash_ref->{'111'} = 'aaa';
+		$hash_ref->{'222'} = 'aaa';
+		$hash_ref->{'333'} = 'aaa';
+		$hash_ref->{'888'} = 'bbb';
+		$hash_ref->{'999'} = 'bbb';
+		$hash_ref = enlist_values( $hash_ref );
+		exit(0);
+
+
+
 		# Select all the titles from the hold table that have call numbers with zero visible items.
+		printf STDERR "creating master list.\n";
 		my $results = `selhold -j"ACTIVE" -a'N' -t'T' -oC 2>/dev/null | "$PIPE" -d'c0' | selcallnum -iC -z"=0" -oNDz 2>/dev/null`;
-		my $master_list = create_tmp_file( "audithold_v00", $results );
+		my $master_list = create_tmp_file( "audithold_master", $results );
+		printf STDERR "refining master list.\n";
+		$results = `cat "$master_list" | selcatalog -iC -oCSF 2>/dev/null | "$PIPE" -t'c4' -P`;
+		$master_list = create_tmp_file( "audithold_master", $results );
+		
 		# Produces:
-		# 1000216|4|Video game 793.932 SIL|0|
-		# 1000216|30|Video game 793.932 SIL|0|
-		# 1000216|34|Video game 793.932 SIL|0|
-		# 1000216|46|Video Game Not Available|0|
-		# 1001072|47|Large Print KIN|0|
-		# 1001072|52|Large Print KIN|0| 
+		# 1000066|36|Picture books D PBK|0|epl000001956
+		### Here we create two tables; one for the call num key and one for the item ids callnum key values.
+		my @key_indexes     = (4,2);
+		my @value_indexes   = (0,1);
+		my $master_hash_ref = {};
+		$master_hash_ref    = create_hash_table_ref( $master_list, \@key_indexes, \@value_indexes );
+		# $master_hash_ref->{'epl000001956|Picture books D PBK|'} = '1000066|36|'
+		
+		
+		printf STDERR "distilling items for master list.\n";
+		$results = `cat "$master_list" | selitem -iN -oNBl 2>/dev/null | "$PIPE" -t'c2'`;
+		my $items_list = create_tmp_file( "audithold_items", $results );
+		
+		
+		# Produces:
+		# 1000066|36|31221101011349|DISCARD
+		$master_hash_ref   = {};
+		@key_indexes       = (2,3);
+		@value_indexes     = (0,1);
+		my $items_hash_ref = {};
+		$items_hash_ref    = create_hash_table_ref( $master_list, \@key_indexes, \@value_indexes );
+		# $items_hash_ref->{'31221101011349|DISCARD|'} = '1000066|36|'
+		
+		
 		# From this list we can weed out volumes that have no visible copies with:
 		$results = `cat "$master_list" | "$PIPE" -g'c2:(v|V)\\.' -d'c2,c0' | "$PIPE" -s'c0' -U`;
-		my $volume_list = create_tmp_file( "audithold_v01", $results );
+		my $volume_list = create_tmp_file( "audithold_volumes", $results );
 		report_file_counts( "volumes", $volume_list );
-		print_report( "Volumes with non-visible items report", $volume_list ) if ( $opt{'V'} );
+		print_report( "Volumes with non-visible items report", $volume_list, $items_hash_ref );
 		$results = `cat "$master_list" | "$PIPE" -g'c2:\\s+(19|20)\\d\\d' -d'c2,c0' | "$PIPE" -s'c0' -U`;
-		my $annuals_list = create_tmp_file( "audithold_v02", $results );
+		my $annuals_list = create_tmp_file( "audithold_annuals", $results );
 		report_file_counts( "annuals", $annuals_list );
-		print_report( "Annuals with non-visible items report", $annuals_list ) if ( $opt{'V'} );
+		print_report( "Annuals with non-visible items report", $annuals_list, "" );
 		$results = `cat "$master_list" | "$PIPE" -g'c2:(bk|BK)\.' -d'c2,c0' | "$PIPE" -s'c0' -U`;
-		my $bk_list = create_tmp_file( "audithold_v03", $results );
+		my $bk_list = create_tmp_file( "audithold_books", $results );
 		report_file_counts( "book volumes", $bk_list );
-		print_report( "Multi-volume books with non-visible items report", $bk_list ) if ( $opt{'V'} );
+		print_report( "Multi-volume books with non-visible items report", $bk_list, "" );
 		$results = `cat "$master_list" | "$PIPE" -g'c2:\\s+(p|P)(t|T)(s|S)?\\.' -d'c2,c0' | "$PIPE" -s'c0' -U`;
-		my $sets_list = create_tmp_file( "audithold_v04", $results );
+		my $sets_list = create_tmp_file( "audithold_sets", $results );
 		report_file_counts( "sets", $sets_list );
-		print_report( "Sets with non-visible items report", $sets_list ) if ( $opt{'V'} );
+		print_report( "Sets with non-visible items report", $sets_list, "" );
 		$results = `cat "$master_list" | "$PIPE" -g'c2:\\s+(k|K)(i|I)(t|T)' -d'c2,c0' | "$PIPE" -s'c0' -U`;
-		my $kits_list = create_tmp_file( "audithold_v05", $results );
+		my $kits_list = create_tmp_file( "audithold_kits", $results );
 		report_file_counts( "kits", $kits_list );
-		print_report( "Kits with non-visible items report", $kits_list ) if ( $opt{'V'} );
+		print_report( "Kits with non-visible items report", $kits_list, "" );
 	}
 }
 
 init();
+
 if ( $opt{'t'} )
 {
 	printf STDERR "Temp files will not be deleted. Please clean up '%s' when done.\n", $TEMP_DIR;
