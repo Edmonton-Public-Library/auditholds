@@ -119,10 +119,6 @@ sub clean_up
 			{
 				unlink $file;
 			}
-			else
-			{
-				printf STDERR "** Warning: file '%s' not found.\n", $file;
-			}
 		}
 	}
 }
@@ -173,7 +169,7 @@ sub count_lines( $ )
 # param:  List reference of integers that are the 0 based indexes to the columns that make up the value to an entry.
 #         If the list is empty the value '1' is stored as a default value and a warning message is issued.
 # return: Reference to the hash created by the process which will be empty if anything fails.
-sub create_hash_table_ref( $$$ )
+sub read_file_into_hash_reference( $$$ )
 {
 	my $hash_ref = {};
 	my $file     = shift;
@@ -216,7 +212,10 @@ sub create_hash_table_ref( $$$ )
 	return $hash_ref;
 }
 
-# Takes all the unique keys and adds them all into a list reference that.
+# Convert the data structure (hash table reference) in which all the keys have similar
+# values into a hash table (reference) that has as its keys, the values from the 
+# original table, but the values are a list (reference) of keys from the original table.
+# Example:
 # Given a hash ref like:
 # hash_ref{'111'} = 'abc'
 # hash_ref{'222'} = 'abc'
@@ -224,31 +223,21 @@ sub create_hash_table_ref( $$$ )
 # Create a new hash that looks like
 # hash_ref_prime{'abc'} =  ('111', '222', '333')
 # param:  hash reference of keys and values.
-# return: values as keys, with (previous) keys as a list of values.
+# return: new hash reference.
 sub enlist_values( $ )
 {
 	my $hash_in = shift;
 	my $hash_out= {};
 	foreach my $key ( keys %$hash_in )
 	{
-		my $ass_value = ();
-		my $new_key   = $hash_in->{"$key"};
-		printf STDERR " ===== '%s'\n", $new_key;
-		if ( exists $hash_out->{$new_key} )
+		my $new_key = $hash_in->{ $key };
+		my $value_list_ref = ();
+		if ( exists $hash_out->{ $new_key } )
 		{
-			$ass_value = $hash_out->{$new_key}; # This becomes the new key and the value is the array of items 
+			$value_list_ref = $hash_out->{ $new_key };
 		}
-		push @{ $ass_value }, $key;
-		printf STDERR "  pushed  '%s' into '%s'\n", $key, $new_key;
-		# $hash_out->{$new_key} = $ass_value;
-	}
-	foreach ( my ($k, $v) = each %$hash_out )
-	{
-		printf STDERR "key: '%s'\n", $k;
-		foreach my $value ( @{$v} )
-		{
-			printf STDERR " +- '%s'\n", $value;
-		}
+		push @{ $value_list_ref }, $key;
+		$hash_out->{ $new_key } = $value_list_ref;
 	}
 	return $hash_out;
 }
@@ -274,7 +263,7 @@ sub report_file_counts( $$ )
 # Formats and prints a report of findings, TCN CallNum and optional items.
 # param:  String header message.
 # param:  result string from API calls. Consumes data like:
-#     '1000066|36|Picture books D PBK|0|epl000001956|31221101011349|DISCARD'
+#     '1000044|60|Easy readers M PBK|0|epl000001934|'
 #     Outputs: flex key | call num and optional IDs if -i selected.
 # param:  Hash reference of items with callnum key values i.e.: '1000216|46|'.
 # return: <none>
@@ -291,13 +280,26 @@ sub print_report( $$$ )
 	}
 	my $items= shift;
 	# Get rid of the initial call num for output, 
-	my $results = `cat "$file" | "$PIPE" -g'c6:DISCARD' -o'c4,c2,c5,c6' | "$PIPE" -s'c0'`;
+	my $results = `cat "$file" | "$PIPE" -o'c4,c2,c0,c1' | "$PIPE" -s'c0'`;
 	my @lines = split '\n', $results;
 	while ( @lines )
 	{
 		my $line = shift @lines;
-		my ( $tcn, $callnum, $item, $location ) = split '\|', $line;
-		printf "%11s %32s %14s, %10s\n", $tcn, $callnum, $item, $location;
+		chomp $line;
+		my ( $tcn, $callnum, $cat_key, $sequence ) = split '\|', $line;
+		# printf STDEERR "%11s %32s %14s, %10s\n", $tcn, $callnum, $cat_key, $sequence;
+		printf "%s, %s\n", $tcn, $callnum;
+		if ( $opt{'i'} )
+		{
+			# Our look up key is found in the cat key and sequence. We use them to look up items in the items hash_reference (param 3).
+			my $key = sprintf "%s|%s|", $cat_key, $sequence;
+			my $list_of_items = $items->{"$key"};
+			foreach my $item_line ( @{ $list_of_items } )
+			{
+				my ( $item, $location ) = split '\|', $item_line;
+				printf "   %14s %10s\n", $item, $location;
+			}
+		}
 	}
 }
 
@@ -359,17 +361,6 @@ sub init
 	}
 	if ( $opt{'v'} )
 	{
-		my $hash_ref = {};
-		$hash_ref->{'111'} = 'aaa';
-		$hash_ref->{'222'} = 'aaa';
-		$hash_ref->{'333'} = 'aaa';
-		$hash_ref->{'888'} = 'bbb';
-		$hash_ref->{'999'} = 'bbb';
-		$hash_ref = enlist_values( $hash_ref );
-		exit(0);
-
-
-
 		# Select all the titles from the hold table that have call numbers with zero visible items.
 		printf STDERR "creating master list.\n";
 		my $results = `selhold -j"ACTIVE" -a'N' -t'T' -oC 2>/dev/null | "$PIPE" -d'c0' | selcallnum -iC -z"=0" -oNDz 2>/dev/null`;
@@ -377,31 +368,32 @@ sub init
 		printf STDERR "refining master list.\n";
 		$results = `cat "$master_list" | selcatalog -iC -oCSF 2>/dev/null | "$PIPE" -t'c4' -P`;
 		$master_list = create_tmp_file( "audithold_master", $results );
-		
 		# Produces:
 		# 1000066|36|Picture books D PBK|0|epl000001956
+		
 		### Here we create two tables; one for the call num key and one for the item ids callnum key values.
 		my @key_indexes     = (4,2);
 		my @value_indexes   = (0,1);
 		my $master_hash_ref = {};
-		$master_hash_ref    = create_hash_table_ref( $master_list, \@key_indexes, \@value_indexes );
+		$master_hash_ref    = read_file_into_hash_reference( $master_list, \@key_indexes, \@value_indexes );
 		# $master_hash_ref->{'epl000001956|Picture books D PBK|'} = '1000066|36|'
 		
 		
 		printf STDERR "distilling items for master list.\n";
-		$results = `cat "$master_list" | selitem -iN -oNBl 2>/dev/null | "$PIPE" -t'c2'`;
+		$results = `cat "$master_list" | selitem -iN -oNBm 2>/dev/null | "$PIPE" -t'c2'`;
 		my $items_list = create_tmp_file( "audithold_items", $results );
-		
-		
 		# Produces:
 		# 1000066|36|31221101011349|DISCARD
 		$master_hash_ref   = {};
 		@key_indexes       = (2,3);
 		@value_indexes     = (0,1);
 		my $items_hash_ref = {};
-		$items_hash_ref    = create_hash_table_ref( $master_list, \@key_indexes, \@value_indexes );
+		$items_hash_ref    = read_file_into_hash_reference( $items_list, \@key_indexes, \@value_indexes );
 		# $items_hash_ref->{'31221101011349|DISCARD|'} = '1000066|36|'
 		
+		# Now using enlist to make lists of items for each call num key.
+		$items_hash_ref = enlist_values( $items_hash_ref );
+		# $items_hash_ref->{'1000066|36|'} = ('31221101011349|DISCARD|', '...')
 		
 		# From this list we can weed out volumes that have no visible copies with:
 		$results = `cat "$master_list" | "$PIPE" -g'c2:(v|V)\\.' -d'c2,c0' | "$PIPE" -s'c0' -U`;
@@ -411,19 +403,19 @@ sub init
 		$results = `cat "$master_list" | "$PIPE" -g'c2:\\s+(19|20)\\d\\d' -d'c2,c0' | "$PIPE" -s'c0' -U`;
 		my $annuals_list = create_tmp_file( "audithold_annuals", $results );
 		report_file_counts( "annuals", $annuals_list );
-		print_report( "Annuals with non-visible items report", $annuals_list, "" );
+		print_report( "Annuals with non-visible items report", $annuals_list, $items_hash_ref );
 		$results = `cat "$master_list" | "$PIPE" -g'c2:(bk|BK)\.' -d'c2,c0' | "$PIPE" -s'c0' -U`;
 		my $bk_list = create_tmp_file( "audithold_books", $results );
 		report_file_counts( "book volumes", $bk_list );
-		print_report( "Multi-volume books with non-visible items report", $bk_list, "" );
+		print_report( "Multi-volume books with non-visible items report", $bk_list, $items_hash_ref );
 		$results = `cat "$master_list" | "$PIPE" -g'c2:\\s+(p|P)(t|T)(s|S)?\\.' -d'c2,c0' | "$PIPE" -s'c0' -U`;
 		my $sets_list = create_tmp_file( "audithold_sets", $results );
 		report_file_counts( "sets", $sets_list );
-		print_report( "Sets with non-visible items report", $sets_list, "" );
+		print_report( "Sets with non-visible items report", $sets_list, $items_hash_ref );
 		$results = `cat "$master_list" | "$PIPE" -g'c2:\\s+(k|K)(i|I)(t|T)' -d'c2,c0' | "$PIPE" -s'c0' -U`;
 		my $kits_list = create_tmp_file( "audithold_kits", $results );
 		report_file_counts( "kits", $kits_list );
-		print_report( "Kits with non-visible items report", $kits_list, "" );
+		print_report( "Kits with non-visible items report", $kits_list, $items_hash_ref );
 	}
 }
 
