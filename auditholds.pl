@@ -288,18 +288,33 @@ sub print_report( $$$ )
 		chomp $line;
 		my ( $tcn, $callnum, $cat_key, $sequence ) = split '\|', $line;
 		# printf STDEERR "%11s %32s %14s, %10s\n", $tcn, $callnum, $cat_key, $sequence;
-		printf "%s, %s\n", $tcn, $callnum;
-		if ( $opt{'i'} )
+		my $output_str = sprintf "%s, %s\n", $tcn, $callnum;
+		if ( $items )
 		{
 			# Our look up key is found in the cat key and sequence. We use them to look up items in the items hash_reference (param 3).
 			my $key = sprintf "%s|%s|", $cat_key, $sequence;
 			my $list_of_items = $items->{"$key"};
+			my $is_discard = 0;
 			foreach my $item_line ( @{ $list_of_items } )
 			{
 				my ( $item, $location ) = split '\|', $item_line;
-				printf "   %14s %10s\n", $item, $location;
+				$is_discard = 1 if ( $location =~ m/DISCARD/ );
+				if ( $opt{'i'} )
+				{
+					$output_str .= sprintf "    %14s %10s\n", $item, $location;
+				}
+			}
+			if ( $is_discard )
+			{
+				printf "* ";
+			}
+			else
+			{
+				printf "  ";  
 			}
 		}
+		# Line ready to print.
+		printf "%s", $output_str;
 	}
 }
 
@@ -370,15 +385,12 @@ sub init
 		$master_list = create_tmp_file( "audithold_master", $results );
 		# Produces:
 		# 1000066|36|Picture books D PBK|0|epl000001956
-		
 		### Here we create two tables; one for the call num key and one for the item ids callnum key values.
 		my @key_indexes     = (4,2);
 		my @value_indexes   = (0,1);
 		my $master_hash_ref = {};
 		$master_hash_ref    = read_file_into_hash_reference( $master_list, \@key_indexes, \@value_indexes );
 		# $master_hash_ref->{'epl000001956|Picture books D PBK|'} = '1000066|36|'
-		
-		
 		printf STDERR "distilling items for master list.\n";
 		$results = `cat "$master_list" | selitem -iN -oNBm 2>/dev/null | "$PIPE" -t'c2'`;
 		my $items_list = create_tmp_file( "audithold_items", $results );
@@ -390,16 +402,14 @@ sub init
 		my $items_hash_ref = {};
 		$items_hash_ref    = read_file_into_hash_reference( $items_list, \@key_indexes, \@value_indexes );
 		# $items_hash_ref->{'31221101011349|DISCARD|'} = '1000066|36|'
-		
 		# Now using enlist to make lists of items for each call num key.
 		$items_hash_ref = enlist_values( $items_hash_ref );
 		# $items_hash_ref->{'1000066|36|'} = ('31221101011349|DISCARD|', '...')
-		
 		# From this list we can weed out volumes that have no visible copies with:
 		$results = `cat "$master_list" | "$PIPE" -g'c2:(v|V)\\.' -d'c2,c0' | "$PIPE" -s'c0' -U`;
 		my $volume_list = create_tmp_file( "audithold_volumes", $results );
 		report_file_counts( "volumes", $volume_list );
-		print_report( "Volumes with non-visible items report", $volume_list, $items_hash_ref );
+		print_report( "Volume call nums with non-visible items report", $volume_list, $items_hash_ref );
 		$results = `cat "$master_list" | "$PIPE" -g'c2:\\s+(19|20)\\d\\d' -d'c2,c0' | "$PIPE" -s'c0' -U`;
 		my $annuals_list = create_tmp_file( "audithold_annuals", $results );
 		report_file_counts( "annuals", $annuals_list );
