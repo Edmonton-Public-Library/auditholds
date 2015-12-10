@@ -26,6 +26,7 @@
 # Author:  Andrew Nisbet, Edmonton Public Library
 # Created: Wed Sep 9 11:29:32 MDT 2015
 # Rev: 
+#          0.6.x Dec. 09, 2015 - Format hold issue reporting.
 #          0.6.w Dec. 03, 2015 - Add further refinement and output of discarded items with holds.
 #          0.6.v Oct. 22, 2015 - Fixed error reading empty file if no orphaned holds found.
 #          0.6.u Oct. 20, 2015 - reporting.
@@ -65,7 +66,8 @@ my $BINCUSTOM          = `getpathname bincustom`;
 chomp $BINCUSTOM;
 my $PIPE               = "$BINCUSTOM/pipe.pl";
 my $DIFF               = "$BINCUSTOM/diff.pl";
-my $VERSION            = qq{0.6.w};
+my $MASTER_LIST        = '';  # All functions start with the same basic selection of titles. This is the name of that file.
+my $VERSION            = qq{0.6.x};
 
 #
 # Message about this program and how to use it.
@@ -131,9 +133,7 @@ sub create_tmp_file( $$ )
 {
 	my $name    = shift;
 	my $results = shift;
-	my $master_file = "$TEMP_DIR/$name.$TIME";
-	# Return just the file name if there are no results to report.
-	return $master_file if ( ! $results );
+	my $master_file = "$TEMP_DIR/$name.$TIME"; 
 	open FH, ">$master_file" or die "*** error opening '$master_file', $!\n";
 	my @list = split '\n', $results;
 	foreach my $line ( @list )
@@ -287,12 +287,22 @@ sub print_report( $$$ )
 		my $line = shift @lines;
 		chomp $line;
 		my ( $tcn, $callnum, $cat_key, $sequence ) = split '\|', $line;
-		# printf STDEERR "%11s %32s %14s, %10s\n", $tcn, $callnum, $cat_key, $sequence;
+		# printf STDERR "<<%s %s %s, %s>>\n", $tcn, $callnum, $cat_key, $sequence;
 		my $output_str = sprintf "%s, %s\n", $tcn, $callnum;
-		if ( $items )
+		if ( scalar keys %$items )
 		{
 			# Our look up key is found in the cat key and sequence. We use them to look up items in the items hash_reference (param 3).
-			my $key = sprintf "%s|%s|", $cat_key, $sequence;
+			my $key = '';
+			# Some reports (orphan) don't include a sequence number because they roll up items to a title.
+			# Items won't match exact callnum keys.
+			if ( $sequence )
+			{
+				$key = sprintf "%s|%s|", $cat_key, $sequence;
+			}
+			else
+			{
+				$key = sprintf "%s|", $cat_key;
+			}
 			my $list_of_items = $items->{"$key"};
 			my $is_discard = 0;
 			foreach my $item_line ( @{ $list_of_items } )
@@ -318,6 +328,168 @@ sub print_report( $$$ )
 	}
 }
 
+# Audits hold balances across titles with different item formats. The function looks at titles that have different
+# item types, but focuses on titles with holds where one or more call numbers have visible copies but 0 holds.
+# param:  <none>
+# return: <none>
+sub audit_formats( $ )
+{
+	my $master_list = shift;
+	# TODO: fix to account for the differences between the two item types. You are looking for call numbs where 
+	# all of the items under a call num range have 0 visible copies.
+	# 1000047|38|Easy readers T PBK|0|epl000001934|
+	# 1000047|43|Easy readers T PBK|0|epl000001934|
+	# 1000051|11|Easy readers L TradePBK|0|epl00019444|
+	# We need to get titles with more than 1 hold, with zero visible items under a call number.
+	my $results = `cat "$master_list" | "$PIPE" -g'c2:PBK' -d'c2,c0' -P`;
+	my $format_callnum_keys = create_tmp_file( "audithold_f_all_pbk_callnums", $results );
+	# 767123|30|130.973 BIR PBK|0|a767123|
+	printf STDERR "distilling items for master list.\n";
+	$results = `cat "$master_list" | selitem -iN -oNBm 2>/dev/null | "$PIPE" -t'c2'`;
+	my $items_list = create_tmp_file( "audithold_f_items", $results );
+	# Produces:
+	# 1000066|36|31221101011349|DISCARD
+	my @key_indexes       = (2,3);
+	my @value_indexes     = (0,1);
+	my $items_hash_ref = {};
+	$items_hash_ref    = read_file_into_hash_reference( $items_list, \@key_indexes, \@value_indexes );
+	# $items_hash_ref->{'31221101011349|DISCARD|'} = '1000066|36|'
+	# Now using enlist to make lists of items for each call num key.
+	$items_hash_ref = enlist_values( $items_hash_ref );
+	# $items_hash_ref->{'1000066|36|'} = ('31221101011349|DISCARD|', '...')
+	report_file_counts( "Holds stuck on format", $format_callnum_keys );
+	print_report( "Holds stuck on item format report", $format_callnum_keys, $items_hash_ref ) if ( $opt{'V'} );
+}
+
+# Orphaned holds; holds for titles that are not multi-volume titles, but have callnumbers with variances in holds counts relative to the title.
+# param:  <none>
+# return: <none>
+sub audit_orphans( $ )
+{
+	my $master_list = shift;
+	my $results = `cat "$master_list" | "$PIPE" -d'c0'`;
+	my $cat_keys = create_tmp_file( "audithold_o_deduped_master", $results );
+	my $differences = '';
+	# Test if the file exists because sometimes theres just aren't any orphaned holds.
+	if ( -s $cat_keys )
+	{
+		# To get the holds on a title do this:
+		# 1413866|3|
+		$results = `cat "$cat_keys" | selcatalog -iC -oCh 2>/dev/null`;
+		my $hold_title_counts = create_tmp_file( "audithold_o_active_NA_title_holds", $results );
+		# This will select all the items under a cat key with holds and count the holds on each item.
+		# 1413866|1|
+		# Do another selection but this time we want the holds on call numbers. We will compare that with the count on the title.
+		$results = `cat "$cat_keys" | selhold -iC -a'N' -t'T' -j"ACTIVE" -oI 2>/dev/null | "$PIPE" -d'c0' -A -P | "$PIPE" -o'c1,c0' -P`;
+		my $hold_item_counts = create_tmp_file( "audithold_o_active_NA_call_num_holds", $results );
+		# Now diff the two files and merge the hold counts.
+		$results = `echo "$hold_title_counts not $hold_item_counts" | "$DIFF" -e'c0,c1' -f'c0,c1'`;
+	}
+	$differences = create_tmp_file( "audithold_o_diff_title_callnum_hold_counts", $results );
+	# Now weed out the items that are intransit, they create a false positive result.# But we don't want in transit items because they produce false positives.
+	$results = `cat "$differences" | selitem -iN -oBmN 2>/dev/null`;
+	my $items_list = create_tmp_file( "audithold_o_items_from_titles", $results );
+	my $items_hash_ref = {};
+	# Expected result is '31221101011349|DISCARD|1000066|36|'.
+	if ( -s $items_list )
+	{
+		my @key_indexes    = (2,3);
+		my @value_indexes  = (0);
+		$items_hash_ref    = read_file_into_hash_reference( $items_list, \@key_indexes, \@value_indexes );
+		# $items_hash_ref->{'31221101011349|DISCARD|'} = '1000066|'
+		# Now using enlist to make lists of items for each call num key.
+		$items_hash_ref = enlist_values( $items_hash_ref );
+	}
+	# 1000044|60|Easy readers M PBK|0|epl000001934|
+	# 1525250|20|DVD MID|1|a1525250|
+	# But sometimes there are no problems so...
+	if ( -s $differences )
+	{
+		$results = `cat "$differences" | selcallnum -iC -oCNDz 2>/dev/null | selcatalog -iC -oSF 2>/dev/null | "$PIPE" -d'c0,c2' -t'c4' -P`;
+	}
+	else
+	{
+		$results = "";
+	}
+	my $titles = create_tmp_file( "audithold_o_title_list", $results );
+	report_file_counts( "Orphaned holds", $titles );
+	print_report( "Orphaned holds report", $titles, $items_hash_ref ) if ( $opt{'V'} );
+}
+
+# Audits volume holds for issues such as titles with volumes that have no visible items under call nums. Breaks out
+# items in report if '-i' is used. Places an '*' infront of titles that have call nums with discarded copies. These
+# seem to cause the most problem for demand management.
+# param:  Name of the master list of call numbers.
+# return: <none>
+sub audit_volumes( $ )
+{
+	my $master_list = shift;
+	# Input:
+	# 1000066|36|Picture books D PBK|0|epl000001956
+	printf STDERR "distilling items for master list.\n";
+	my $results = `cat "$master_list" | selitem -iN -oNBm 2>/dev/null | "$PIPE" -t'c2'`;
+	my $items_list = create_tmp_file( "audithold_v_items", $results );
+	# Produces:
+	# 1000066|36|31221101011349|DISCARD
+	my @key_indexes       = (2,3);
+	my @value_indexes     = (0,1);
+	my $items_hash_ref = {};
+	$items_hash_ref    = read_file_into_hash_reference( $items_list, \@key_indexes, \@value_indexes );
+	# $items_hash_ref->{'31221101011349|DISCARD|'} = '1000066|36|'
+	# Now using enlist to make lists of items for each call num key.
+	$items_hash_ref = enlist_values( $items_hash_ref );
+	# $items_hash_ref->{'1000066|36|'} = ('31221101011349|DISCARD|', '...')
+	# From this list we can weed out volumes that have no visible copies with:
+	$results = `cat "$master_list" | "$PIPE" -g'c2:(v|V)\\.' -d'c2,c0' | "$PIPE" -s'c0' -U`;
+	my $volume_list = create_tmp_file( "audithold_v_volumes", $results );
+	report_file_counts( "volumes", $volume_list );
+	print_report( "Volume call nums with non-visible items report", $volume_list, $items_hash_ref );
+	$results = `cat "$master_list" | "$PIPE" -g'c2:\\s+(19|20)\\d\\d' -d'c2,c0' | "$PIPE" -s'c0' -U`;
+	my $annuals_list = create_tmp_file( "audithold_v_annuals", $results );
+	report_file_counts( "annuals", $annuals_list );
+	print_report( "Annuals with non-visible items report", $annuals_list, $items_hash_ref );
+	$results = `cat "$master_list" | "$PIPE" -g'c2:(bk|BK)\.' -d'c2,c0' | "$PIPE" -s'c0' -U`;
+	my $bk_list = create_tmp_file( "audithold_v_books", $results );
+	report_file_counts( "book volumes", $bk_list );
+	print_report( "Multi-volume books with non-visible items report", $bk_list, $items_hash_ref );
+	$results = `cat "$master_list" | "$PIPE" -g'c2:\\s+(p|P)(t|T)(s|S)?\\.' -d'c2,c0' | "$PIPE" -s'c0' -U`;
+	my $sets_list = create_tmp_file( "audithold_v_sets", $results );
+	report_file_counts( "sets", $sets_list );
+	print_report( "Sets with non-visible items report", $sets_list, $items_hash_ref );
+	$results = `cat "$master_list" | "$PIPE" -g'c2:\\s+(k|K)(i|I)(t|T)' -d'c2,c0' | "$PIPE" -s'c0' -U`;
+	my $kits_list = create_tmp_file( "audithold_v_kits", $results );
+	report_file_counts( "kits", $kits_list );
+	print_report( "Kits with non-visible items report", $kits_list, $items_hash_ref );
+}
+
+# This is an expensive list to create and we can re-use it with other operations, so do it once and let 
+# subsequent audits reuse it.
+# Produces:
+# 1000047|38|Easy readers T PBK|0|
+# 1000047|43|Easy readers T PBK|0|
+# 1000051|11|Easy readers L TradePBK|0|
+# param:  <none>
+# return: Name of the master file.
+sub init_master_hold_lists()
+{
+	my $file_name = "audithold_master_list";
+	# if this has been done, don't run again. The script produces a uniq name for each
+	# run of the script based on time.
+	return $file_name if ( $MASTER_LIST and -s $MASTER_LIST ); 
+	printf STDERR "creating master list.\n";
+	my $results = `selhold -j"ACTIVE" -a'N' -t'T' -oC 2>/dev/null | "$PIPE" -d'c0' | selcallnum -iC -z"=0" -oNDz 2>/dev/null`;
+	my $master_list = create_tmp_file( "audithold_m_tmp", $results );
+	printf STDERR "refining master list.\n";
+	$results = `cat "$master_list" | selcatalog -iC -oCSF 2>/dev/null | "$PIPE" -t'c4' -P`;
+	my $MASTER_LIST = create_tmp_file( $file_name, $results );
+	if ( ! $MASTER_LIST or ! -s $MASTER_LIST )
+	{
+		printf STDERR "** error creating master list.\n";
+		exit 0;
+	}
+	return $MASTER_LIST;
+}
+
 # Kicks off the setting of various switches.
 # param:  
 # return: 
@@ -331,106 +503,13 @@ sub init
 		printf STDERR "*** error, required application '%s' not found.\n", $PIPE;
 		exit 0;
 	}
-	# TODO: fix to account for the differences between the two item types. You are looking for call numbs where 
-	# all of the items under a call num range have 0 visible copies.
-	if ( $opt{'f'} )
-	{
-		# Select all the titles from the hold table that have call numbers with zero visible items.
-		my $results = `selhold -j"ACTIVE" -a'N' -t'T' -oC 2>/dev/null | "$PIPE" -d'c0' | selcallnum -iC -z"=0" -oNDz 2>/dev/null`;
-		my $cat_keys = create_tmp_file( "audithold_f00", $results );
-		# Produces:
-		# 1000047|38|Easy readers T PBK|0|
-		# 1000047|43|Easy readers T PBK|0|
-		# 1000051|11|Easy readers L TradePBK|0|
-		# We need to get titles with more than 1 hold, with zero visible items under a call number.
-		$results = `cat "$cat_keys" | "$PIPE" -g'c2:PBK' -d'c2,c0'`;
-		my $format_callnum_keys = create_tmp_file( "audithold_f01", $results );
-		report_file_counts( "Holds stuck on format", $format_callnum_keys );
-		print_report( "Holds stuck on item format report", $format_callnum_keys, "" ) if ( $opt{'V'} );
-	}
-	# Orphaned holds; holds for titles that are not multi-volume titles, but have callnumbers with variances in holds counts relative to the title.
-	if ( $opt{'o'} )
-	{
-		my $results = `selhold -j"ACTIVE" -a'N' -t'T' -oC 2>/dev/null | "$PIPE" -d'c0' | selcallnum -iC -z"=0" -oC 2>/dev/null | "$PIPE" -d'c0'`;
-		my $cat_keys = create_tmp_file( "audithold_o00", $results );
-		my $differences = '';
-		# Test if the file exists because sometimes theres just aren't any orphaned holds.
-		if ( -s $cat_keys )
-		{
-			# To get the holds on a title do this:
-			# 1413866|3|
-			$results = `cat "$cat_keys" | selcatalog -iC -oCh 2>/dev/null`;
-			my $hold_title_counts = create_tmp_file( "audithold_o01", $results );
-			# This will select all the items under a cat key with holds and count the holds on each item.
-			# 1413866|1|
-			$results = `cat "$cat_keys" | selhold -iC -a'N' -t'T' -j"ACTIVE" -oI 2>/dev/null | "$PIPE" -d'c0' -A -P | "$PIPE" -o'c1,c0' -P`;
-			my $hold_item_counts = create_tmp_file( "audithold_o02", $results );
-			# Now diff the two files and merge the hold counts.
-			$results = `echo "$hold_title_counts not $hold_item_counts" | "$DIFF" -e'c0,c1' -f'c0,c1'`;
-		}
-		$differences = create_tmp_file( "audithold_o03", $results );
-		# Now weed out the items that are intransit, they create a false positive result.# But we don't want in transit items because they produce false positives.
-		# selitem -iI -m"~INTRANSIT" -oI 2>/dev/null |
-		report_file_counts( "Orphaned holds", $differences );
-		print_report( "Orphaned holds report", $differences, "" ) if ( $opt{'V'} );
-	}
-	if ( $opt{'v'} )
-	{
-		# Select all the titles from the hold table that have call numbers with zero visible items.
-		printf STDERR "creating master list.\n";
-		my $results = `selhold -j"ACTIVE" -a'N' -t'T' -oC 2>/dev/null | "$PIPE" -d'c0' | selcallnum -iC -z"=0" -oNDz 2>/dev/null`;
-		my $master_list = create_tmp_file( "audithold_master", $results );
-		printf STDERR "refining master list.\n";
-		$results = `cat "$master_list" | selcatalog -iC -oCSF 2>/dev/null | "$PIPE" -t'c4' -P`;
-		$master_list = create_tmp_file( "audithold_master", $results );
-		# Produces:
-		# 1000066|36|Picture books D PBK|0|epl000001956
-		### Here we create two tables; one for the call num key and one for the item ids callnum key values.
-		my @key_indexes     = (4,2);
-		my @value_indexes   = (0,1);
-		my $master_hash_ref = {};
-		$master_hash_ref    = read_file_into_hash_reference( $master_list, \@key_indexes, \@value_indexes );
-		# $master_hash_ref->{'epl000001956|Picture books D PBK|'} = '1000066|36|'
-		printf STDERR "distilling items for master list.\n";
-		$results = `cat "$master_list" | selitem -iN -oNBm 2>/dev/null | "$PIPE" -t'c2'`;
-		my $items_list = create_tmp_file( "audithold_items", $results );
-		# Produces:
-		# 1000066|36|31221101011349|DISCARD
-		$master_hash_ref   = {};
-		@key_indexes       = (2,3);
-		@value_indexes     = (0,1);
-		my $items_hash_ref = {};
-		$items_hash_ref    = read_file_into_hash_reference( $items_list, \@key_indexes, \@value_indexes );
-		# $items_hash_ref->{'31221101011349|DISCARD|'} = '1000066|36|'
-		# Now using enlist to make lists of items for each call num key.
-		$items_hash_ref = enlist_values( $items_hash_ref );
-		# $items_hash_ref->{'1000066|36|'} = ('31221101011349|DISCARD|', '...')
-		# From this list we can weed out volumes that have no visible copies with:
-		$results = `cat "$master_list" | "$PIPE" -g'c2:(v|V)\\.' -d'c2,c0' | "$PIPE" -s'c0' -U`;
-		my $volume_list = create_tmp_file( "audithold_volumes", $results );
-		report_file_counts( "volumes", $volume_list );
-		print_report( "Volume call nums with non-visible items report", $volume_list, $items_hash_ref );
-		$results = `cat "$master_list" | "$PIPE" -g'c2:\\s+(19|20)\\d\\d' -d'c2,c0' | "$PIPE" -s'c0' -U`;
-		my $annuals_list = create_tmp_file( "audithold_annuals", $results );
-		report_file_counts( "annuals", $annuals_list );
-		print_report( "Annuals with non-visible items report", $annuals_list, $items_hash_ref );
-		$results = `cat "$master_list" | "$PIPE" -g'c2:(bk|BK)\.' -d'c2,c0' | "$PIPE" -s'c0' -U`;
-		my $bk_list = create_tmp_file( "audithold_books", $results );
-		report_file_counts( "book volumes", $bk_list );
-		print_report( "Multi-volume books with non-visible items report", $bk_list, $items_hash_ref );
-		$results = `cat "$master_list" | "$PIPE" -g'c2:\\s+(p|P)(t|T)(s|S)?\\.' -d'c2,c0' | "$PIPE" -s'c0' -U`;
-		my $sets_list = create_tmp_file( "audithold_sets", $results );
-		report_file_counts( "sets", $sets_list );
-		print_report( "Sets with non-visible items report", $sets_list, $items_hash_ref );
-		$results = `cat "$master_list" | "$PIPE" -g'c2:\\s+(k|K)(i|I)(t|T)' -d'c2,c0' | "$PIPE" -s'c0' -U`;
-		my $kits_list = create_tmp_file( "audithold_kits", $results );
-		report_file_counts( "kits", $kits_list );
-		print_report( "Kits with non-visible items report", $kits_list, $items_hash_ref );
-	}
+	$MASTER_LIST = init_master_hold_lists();
 }
 
 init();
-
+audit_formats( $MASTER_LIST ) if ( $opt{'f'} );
+audit_orphans( $MASTER_LIST ) if ( $opt{'o'} );
+audit_volumes( $MASTER_LIST ) if ( $opt{'v'} );
 if ( $opt{'t'} )
 {
 	printf STDERR "Temp files will not be deleted. Please clean up '%s' when done.\n", $TEMP_DIR;
