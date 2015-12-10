@@ -26,17 +26,12 @@
 # Author:  Andrew Nisbet, Edmonton Public Library
 # Created: Wed Sep 9 11:29:32 MDT 2015
 # Rev: 
+#          0.6.y Dec. 10, 2015 - Format holds now include BOOKs and PBK.
 #          0.6.x Dec. 09, 2015 - Format hold issue reporting.
 #          0.6.w Dec. 03, 2015 - Add further refinement and output of discarded items with holds.
 #          0.6.v Oct. 22, 2015 - Fixed error reading empty file if no orphaned holds found.
 #          0.6.u Oct. 20, 2015 - reporting.
 #          0.6.t Oct. 9, 2015 - Re-factored audit orphaned holds.
-# TODO:    Fix message below.
-# bash-3.2$ ./auditholds.pl -oV
-# Orphaned holds: no errors detected.
-#    Orphaned holds report, 11/06/2015
-#   -------------------------------------------------
-# cat: cannot open /tmp/audithold_o03.144156
 #
 #######################################################################
 
@@ -67,7 +62,7 @@ chomp $BINCUSTOM;
 my $PIPE               = "$BINCUSTOM/pipe.pl";
 my $DIFF               = "$BINCUSTOM/diff.pl";
 my $MASTER_LIST        = '';  # All functions start with the same basic selection of titles. This is the name of that file.
-my $VERSION            = qq{0.6.x};
+my $VERSION            = qq{0.6.y};
 
 #
 # Message about this program and how to use it.
@@ -329,19 +324,25 @@ sub print_report( $$$ )
 }
 
 # Audits hold balances across titles with different item formats. The function looks at titles that have different
-# item types, but focuses on titles with holds where one or more call numbers have visible copies but 0 holds.
-# param:  <none>
+# item types, but focuses on titles with holds where one or more call numbers have visible copies but 0 holds compared
+# to other call number siblings.
+# param:  <none>, because this function needs to build a list without regard to whether call nums have visible copies or not.
 # return: <none>
-sub audit_formats( $ )
+sub audit_formats()
 {
-	my $master_list = shift;
+	printf STDERR "creating master list.\n";
+	my $results = `selhold -j"ACTIVE" -a'N' -t'T' -oC 2>/dev/null | "$PIPE" -d'c0' | selcallnum -iC -oNDz 2>/dev/null`;
+	my $initial_master_list = create_tmp_file( "audithold_f_tmp", $results );
+	printf STDERR "refining master list.\n";
+	$results = `cat "$master_list" | selcatalog -iC -oCSF 2>/dev/null | "$PIPE" -t'c4' -P`;
+	my $master_list = create_tmp_file( "audithold_f_master", $results );
 	# TODO: fix to account for the differences between the two item types. You are looking for call numbs where 
 	# all of the items under a call num range have 0 visible copies.
 	# 1000047|38|Easy readers T PBK|0|epl000001934|
 	# 1000047|43|Easy readers T PBK|0|epl000001934|
 	# 1000051|11|Easy readers L TradePBK|0|epl00019444|
 	# We need to get titles with more than 1 hold, with zero visible items under a call number.
-	my $results = `cat "$master_list" | "$PIPE" -g'c2:PBK' -d'c2,c0' -P`;
+	my $results = `cat "$master_list" | "$PIPE" -g'c2:PBK' -I -d'c2,c0' -P`;
 	my $format_callnum_keys = create_tmp_file( "audithold_f_all_pbk_callnums", $results );
 	# 767123|30|130.973 BIR PBK|0|a767123|
 	printf STDERR "distilling items for master list.\n";
@@ -357,6 +358,10 @@ sub audit_formats( $ )
 	# Now using enlist to make lists of items for each call num key.
 	$items_hash_ref = enlist_values( $items_hash_ref );
 	# $items_hash_ref->{'1000066|36|'} = ('31221101011349|DISCARD|', '...')
+	
+	# Find all call numbers under the title that have 0 holds but visible copies.
+	
+	
 	report_file_counts( "Holds stuck on format", $format_callnum_keys );
 	print_report( "Holds stuck on item format report", $format_callnum_keys, $items_hash_ref ) if ( $opt{'V'} );
 }
@@ -507,7 +512,7 @@ sub init
 }
 
 init();
-audit_formats( $MASTER_LIST ) if ( $opt{'f'} );
+audit_formats( ) if ( $opt{'f'} );
 audit_orphans( $MASTER_LIST ) if ( $opt{'o'} );
 audit_volumes( $MASTER_LIST ) if ( $opt{'v'} );
 if ( $opt{'t'} )
