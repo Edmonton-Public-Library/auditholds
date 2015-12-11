@@ -26,6 +26,7 @@
 # Author:  Andrew Nisbet, Edmonton Public Library
 # Created: Wed Sep 9 11:29:32 MDT 2015
 # Rev: 
+#          0.7.0 Dec. 10, 2015 - Refactored for better API and easier processing.
 #          0.6.y Dec. 10, 2015 - Format holds now include BOOKs and PBK.
 #          0.6.x Dec. 09, 2015 - Format hold issue reporting.
 #          0.6.w Dec. 03, 2015 - Add further refinement and output of discarded items with holds.
@@ -62,7 +63,7 @@ chomp $BINCUSTOM;
 my $PIPE               = "$BINCUSTOM/pipe.pl";
 my $DIFF               = "$BINCUSTOM/diff.pl";
 my $MASTER_LIST        = '';  # All functions start with the same basic selection of titles. This is the name of that file.
-my $VERSION            = qq{0.6.y};
+my $VERSION            = qq{0.7.0};
 
 #
 # Message about this program and how to use it.
@@ -326,44 +327,54 @@ sub print_report( $$$ )
 # Audits hold balances across titles with different item formats. The function looks at titles that have different
 # item types, but focuses on titles with holds where one or more call numbers have visible copies but 0 holds compared
 # to other call number siblings.
-# param:  <none>, because this function needs to build a list without regard to whether call nums have visible copies or not.
+# param:  Name of the master list of hold titles and call numbers.
 # return: <none>
-sub audit_formats()
+sub audit_formats( $ )
 {
-	printf STDERR "creating master list.\n";
-	my $results = `selhold -j"ACTIVE" -a'N' -t'T' -oC 2>/dev/null | "$PIPE" -d'c0' | selcallnum -iC -oNDz 2>/dev/null`;
-	my $initial_master_list = create_tmp_file( "audithold_f_tmp", $results );
-	printf STDERR "refining master list.\n";
-	$results = `cat "$master_list" | selcatalog -iC -oCSF 2>/dev/null | "$PIPE" -t'c4' -P`;
-	my $master_list = create_tmp_file( "audithold_f_master", $results );
-	# TODO: fix to account for the differences between the two item types. You are looking for call numbs where 
-	# all of the items under a call num range have 0 visible copies.
-	# 1000047|38|Easy readers T PBK|0|epl000001934|
-	# 1000047|43|Easy readers T PBK|0|epl000001934|
-	# 1000051|11|Easy readers L TradePBK|0|epl00019444|
+	# 1000047|38|epl000001937|1|Easy readers T PBK|0
+	# 1000047|43|epl000001937|1|Easy readers T PBK|0
+	# 1000047|55|epl000001937|1|Easy readers T PBK|1
+	# 1000083|20|epl000001962|1|Beginning chapter books - Series M PBK|0
+	# 1000083|38|epl000001962|1|Beginning chapter books - Series M PBK|0
+	# 1000083|52|epl000001962|1|Beginning chapter books - Series M PBK|0
+	# 1000083|56|epl000001962|1|Beginning chapter books - Series M PBK|0
+	# 1000083|64|epl000001962|1|Beginning chapter books - Series M PBK|1
+	# 1000083|7|epl000001962|1|Beginning chapter books - Series M PBK|1
+	# 1000098|21|epl000001991|1|Beginning chapter books - Series M PBK|0
+	my $master_list = shift;
 	# We need to get titles with more than 1 hold, with zero visible items under a call number.
-	my $results = `cat "$master_list" | "$PIPE" -g'c2:PBK' -I -d'c2,c0' -P`;
-	my $format_callnum_keys = create_tmp_file( "audithold_f_all_pbk_callnums", $results );
-	# 767123|30|130.973 BIR PBK|0|a767123|
-	printf STDERR "distilling items for master list.\n";
-	$results = `cat "$master_list" | selitem -iN -oNBm 2>/dev/null | "$PIPE" -t'c2'`;
-	my $items_list = create_tmp_file( "audithold_f_items", $results );
+	# or select flex_key, call_num from table where c3>1 and c5<1 and c4 like %PBK% group by call number.
+	printf STDERR "distilling selection...\n";
+	# Create a list of cat keys with more than 1 hold, with a call number that describes more than one format.
+	my $results = `cat "$master_list" | "$PIPE" -g'c4:PBK' -I -d'c0' -C'c3:gt1' | "$PIPE" -s'c0' -o'c0'`;
+	my $selection_00 = create_tmp_file( "audithold_f_all_pbk_selection_00", $results );
+	# This query will reduce the list to a list of all varient call nums under each title that have different formats, and more than 1 hold.
+	$results = `cat "$selection_00" | selcatalog -iC -oCFh 2>/dev/null | selcallnum -iC -oNSDz 2>/dev/null | "$PIPE" -tc2 -d'c0,c4' | "$PIPE" -s'c1'`;
+	my $selection_01 = create_tmp_file( "audithold_f_all_pbk_selection_01", $results );
+	# This query will reduce the list further to a cat key with more than 1 format varient.
+	$results = `cat "$selection_01" | "$PIPE" -d'c0' -A -P | "$PIPE" -s'c1' -o'c1' -C'c0:gt1'`;
+	my $selection_02 = create_tmp_file( "audithold_f_all_pbk_selection_02", $results );
+	$results = `cat "$selection_02" | selcatalog -iC -oCFh 2>/dev/null | selcallnum -iC -oNSDz 2>/dev/null | "$PIPE" -tc2 -d'c0,c4' | "$PIPE" -s'c0'`;
+	my $selection_03 = create_tmp_file( "audithold_f_all_pbk_selection_03", $results );
+	printf STDERR "... done.\n";
+	# $results = `cat "$master_list" | selitem -iN -oNBm 2>/dev/null | "$PIPE" -t'c2'`;
+	# my $items_list = create_tmp_file( "audithold_f_items", $results );
 	# Produces:
 	# 1000066|36|31221101011349|DISCARD
-	my @key_indexes       = (2,3);
-	my @value_indexes     = (0,1);
-	my $items_hash_ref = {};
-	$items_hash_ref    = read_file_into_hash_reference( $items_list, \@key_indexes, \@value_indexes );
+	# my @key_indexes       = (2,3);
+	# my @value_indexes     = (0,1);
+	# my $items_hash_ref = {};
+	# $items_hash_ref    = read_file_into_hash_reference( $items_list, \@key_indexes, \@value_indexes );
 	# $items_hash_ref->{'31221101011349|DISCARD|'} = '1000066|36|'
 	# Now using enlist to make lists of items for each call num key.
-	$items_hash_ref = enlist_values( $items_hash_ref );
+	# $items_hash_ref = enlist_values( $items_hash_ref );
 	# $items_hash_ref->{'1000066|36|'} = ('31221101011349|DISCARD|', '...')
 	
 	# Find all call numbers under the title that have 0 holds but visible copies.
 	
 	
-	report_file_counts( "Holds stuck on format", $format_callnum_keys );
-	print_report( "Holds stuck on item format report", $format_callnum_keys, $items_hash_ref ) if ( $opt{'V'} );
+	# report_file_counts( "Holds stuck on format", $format_callnum_keys );
+	# print_report( "Holds stuck on item format report", $format_callnum_keys, $items_hash_ref ) if ( $opt{'V'} );
 }
 
 # Orphaned holds; holds for titles that are not multi-volume titles, but have callnumbers with variances in holds counts relative to the title.
@@ -470,23 +481,44 @@ sub audit_volumes( $ )
 # This is an expensive list to create and we can re-use it with other operations, so do it once and let 
 # subsequent audits reuse it.
 # Produces:
-# 1000047|38|Easy readers T PBK|0|
-# 1000047|43|Easy readers T PBK|0|
-# 1000051|11|Easy readers L TradePBK|0|
+# 1000047|38|epl000001937|1|Easy readers T PBK|0
+# 1000047|43|epl000001937|1|Easy readers T PBK|0
+# 1000047|55|epl000001937|1|Easy readers T PBK|1
+# 1000083|20|epl000001962|1|Beginning chapter books - Series M PBK|0
+# 1000083|38|epl000001962|1|Beginning chapter books - Series M PBK|0
+# 1000083|52|epl000001962|1|Beginning chapter books - Series M PBK|0
+# 1000083|56|epl000001962|1|Beginning chapter books - Series M PBK|0
+# 1000083|64|epl000001962|1|Beginning chapter books - Series M PBK|1
+# 1000083|7|epl000001962|1|Beginning chapter books - Series M PBK|1
+# 1000098|21|epl000001991|1|Beginning chapter books - Series M PBK|0
 # param:  <none>
 # return: Name of the master file.
 sub init_master_hold_lists()
 {
 	my $file_name = "audithold_master_list";
-	# if this has been done, don't run again. The script produces a uniq name for each
-	# run of the script based on time.
+	if ( $opt{'q'} )
+	{
+		my @LISTS = <$TEMP_DIR/$file_name*>;
+		$MASTER_LIST = $LISTS[0];
+		$file_name = $LISTS[0];
+	}
 	return $file_name if ( $MASTER_LIST and -s $MASTER_LIST ); 
 	printf STDERR "creating master list.\n";
-	my $results = `selhold -j"ACTIVE" -a'N' -t'T' -oC 2>/dev/null | "$PIPE" -d'c0' | selcallnum -iC -z"=0" -oNDz 2>/dev/null`;
-	my $master_list = create_tmp_file( "audithold_m_tmp", $results );
-	printf STDERR "refining master list.\n";
-	$results = `cat "$master_list" | selcatalog -iC -oCSF 2>/dev/null | "$PIPE" -t'c4' -P`;
+	# echo a708444 | selcatalog -iF -oCF | selhold -iC -oNS | selcallnum -iN -oSDzN | pipe.pl -d'c0,c1' -tc0 -A`
+	# Select all the titles with holds, output the call num key, flex key, holds on title, call number and number of visible items under call number.
+	my $results = `selhold -jACTIVE -aN -oC 2>/dev/null | pipe.pl -d'c0' | selcatalog -iC -oCFh 2>/dev/null | selcallnum -iC -oNSDz 2>/dev/null | pipe.pl -tc2`;
+	# 1000047|38|epl000001937|1|Easy readers T PBK|0
+	# 1000047|43|epl000001937|1|Easy readers T PBK|0
+	# 1000047|55|epl000001937|1|Easy readers T PBK|1
+	# 1000083|20|epl000001962|1|Beginning chapter books - Series M PBK|0
+	# 1000083|38|epl000001962|1|Beginning chapter books - Series M PBK|0
+	# 1000083|52|epl000001962|1|Beginning chapter books - Series M PBK|0
+	# 1000083|56|epl000001962|1|Beginning chapter books - Series M PBK|0
+	# 1000083|64|epl000001962|1|Beginning chapter books - Series M PBK|1
+	# 1000083|7|epl000001962|1|Beginning chapter books - Series M PBK|1
+	# 1000098|21|epl000001991|1|Beginning chapter books - Series M PBK|0
 	my $MASTER_LIST = create_tmp_file( $file_name, $results );
+	# 
 	if ( ! $MASTER_LIST or ! -s $MASTER_LIST )
 	{
 		printf STDERR "** error creating master list.\n";
@@ -500,7 +532,7 @@ sub init_master_hold_lists()
 # return: 
 sub init
 {
-	my $opt_string = 'fiotvVx';
+	my $opt_string = 'fioqtvVx';
 	getopts( "$opt_string", \%opt ) or usage();
 	usage() if ( $opt{'x'} );
 	if ( ! -s $PIPE )
@@ -512,9 +544,9 @@ sub init
 }
 
 init();
-audit_formats( ) if ( $opt{'f'} );
-audit_orphans( $MASTER_LIST ) if ( $opt{'o'} );
-audit_volumes( $MASTER_LIST ) if ( $opt{'v'} );
+audit_formats( $MASTER_LIST ) if ( $opt{'f'} );
+# audit_orphans( $MASTER_LIST ) if ( $opt{'o'} );
+# audit_volumes( $MASTER_LIST ) if ( $opt{'v'} );
 if ( $opt{'t'} )
 {
 	printf STDERR "Temp files will not be deleted. Please clean up '%s' when done.\n", $TEMP_DIR;
