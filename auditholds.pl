@@ -324,6 +324,27 @@ sub print_report( $$$ )
 	}
 }
 
+# Given the name of a file that contains at least call number keys as the first 2 columns
+# return a hash reference of all the items under that call number in a format ready for reporting.
+# param:  name of file with call num keys.
+# return: hash reference of all items in format: $items_hash->{'1000066|36|'} = ('31221101011349|DISCARD|', '...')
+sub get_items( $ )
+{
+	my $master_list = shift;
+	my $items_hash = {};
+	my $results = `cat "$master_list" | selitem -iN -oNBm 2>/dev/null | "$PIPE" -t'c2'`;
+	my $items_list = create_tmp_file( "audithold_items", $results );
+	# Produces:
+	# 1000066|36|31221101011349|DISCARD
+	my @key_indexes       = (2,3);
+	my @value_indexes     = (0,1);
+	$items_hash    = read_file_into_hash_reference( $items_list, \@key_indexes, \@value_indexes );
+	# $items_hash->{'31221101011349|DISCARD|'} = '1000066|36|'
+	# Now using enlist to make lists of items for each call num key.
+	$items_hash = enlist_values( $items_hash );
+	# $items_hash->{'1000066|36|'} = ('31221101011349|DISCARD|', '...')
+	return $items_hash;
+}
 # Audits hold balances across titles with different item formats. The function looks at titles that have different
 # item types, but focuses on titles with holds where one or more call numbers have visible copies but 0 holds compared
 # to other call number siblings.
@@ -354,27 +375,35 @@ sub audit_formats( $ )
 	# This query will reduce the list further to a cat key with more than 1 format varient.
 	$results = `cat "$selection_01" | "$PIPE" -d'c0' -A -P | "$PIPE" -s'c1' -o'c1' -C'c0:gt1'`;
 	my $selection_02 = create_tmp_file( "audithold_f_all_pbk_selection_02", $results );
+	# Next we produce another list like above but just the call nums with different formats and more than one hold.
 	$results = `cat "$selection_02" | selcatalog -iC -oCFh 2>/dev/null | selcallnum -iC -oNSDz 2>/dev/null | "$PIPE" -tc2 -d'c0,c4' | "$PIPE" -s'c0'`;
 	my $selection_03 = create_tmp_file( "audithold_f_all_pbk_selection_03", $results );
+	# We can take the cat keys from $selection_00 and query the hold table for call nums with more than one hold but no visible copy.
+	$results = `cat "$selection_00" | selhold -iC -oN 2>/dev/null | selcallnum -iN -oNz 2>/dev/null | pipe.pl -d'c0,c1' -A | pipe.pl -W'\\s+' -o'c1,c0' | pipe.pl -C'c2:eq0' | pipe.pl -C'c3:ge1`;
+	my $selection_04 = create_tmp_file( "audithold_f_all_pbk_selection_04", $results );
+	$results = `cat "$selection_04" | selcallnum -iN -oNDz 2>/dev/null | selcatalog -iC -oCSF 2>/dev/null | pipe.pl -t'c4'`;
+	my $selection_04a = create_tmp_file( "audithold_f_all_pbk_selection_04a", $results );
+	# Perhaps it is also useful to see if there are differences in the hold queues from other call numbers on the title. If so we know that
+	# these are titles with more than one hold and more than one call number so if any of the holds on a call number are '0' then the holds
+	# are out of balance.
+	$results = `cat "$selection_00" | selhold -iC -oN 2>/dev/null | pipe.pl -d'c0,c1' -A | pipe.pl -W'\\s+' -o'c1,c0' | pipe.pl -C'c2:eq0'`;
+	my $selection_05 = create_tmp_file( "audithold_f_all_pbk_selection_05", $results );
+	$results = `cat "$selection_05" | selcallnum -iN -oNDz 2>/dev/null | selcatalog -iC -oCSF 2>/dev/null | pipe.pl -t'c4'`;
+	my $selection_05a = create_tmp_file( "audithold_f_all_pbk_selection_05a", $results );
 	printf STDERR "... done.\n";
-	# $results = `cat "$master_list" | selitem -iN -oNBm 2>/dev/null | "$PIPE" -t'c2'`;
-	# my $items_list = create_tmp_file( "audithold_f_items", $results );
-	# Produces:
-	# 1000066|36|31221101011349|DISCARD
-	# my @key_indexes       = (2,3);
-	# my @value_indexes     = (0,1);
-	# my $items_hash_ref = {};
-	# $items_hash_ref    = read_file_into_hash_reference( $items_list, \@key_indexes, \@value_indexes );
-	# $items_hash_ref->{'31221101011349|DISCARD|'} = '1000066|36|'
-	# Now using enlist to make lists of items for each call num key.
-	# $items_hash_ref = enlist_values( $items_hash_ref );
-	# $items_hash_ref->{'1000066|36|'} = ('31221101011349|DISCARD|', '...')
 	
-	# Find all call numbers under the title that have 0 holds but visible copies.
-	
-	
-	# report_file_counts( "Holds stuck on format", $format_callnum_keys );
-	# print_report( "Holds stuck on item format report", $format_callnum_keys, $items_hash_ref ) if ( $opt{'V'} );
+	## Now to the reporting:
+	my $items_hash_ref_04 = {};
+	my $items_hash_ref_05 = {};
+	if ( $opt{'i'} )
+	{
+		$items_hash_ref_04 = get_items( $selection_04a );
+		$items_hash_ref_05 = get_items( $selection_05a );
+	}
+	report_file_counts( "multi-format call numbers with 0 visible items", $selection_04a );
+	print_report( "report details", $selection_04a, $items_hash_ref_04 ) if ( $opt{'V'} );
+	report_file_counts( "Titles with multiple item types, where a call number has no holds", $selection_05a );
+	print_report( "report details", $selection_05a, $items_hash_ref_05 ) if ( $opt{'V'} );
 }
 
 # Orphaned holds; holds for titles that are not multi-volume titles, but have callnumbers with variances in holds counts relative to the title.
