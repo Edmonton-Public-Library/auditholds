@@ -82,6 +82,7 @@ are items in stacks but dozens of holds in the queue.
  -f: Produce report of holds stalled on titles because of variation of format PBK vs. TRADE-PBK etc.
  -i: Break out items of concern.
  -o: Produce report of titles with orphaned holds.
+ -q: Quick mode, if a master list is found use it rather than generate a new one.
  -t: Test mode. Doesn't remove any temporary files so you can debug stages of selection.
  -v: Produce report of holds stalled on titles because the title have volumes that have no visible items.
  -V: Verbose reporting. Reports complete item information, otherwise just counts are reported.
@@ -345,6 +346,7 @@ sub get_items( $ )
 	# $items_hash->{'1000066|36|'} = ('31221101011349|DISCARD|', '...')
 	return $items_hash;
 }
+
 # Audits hold balances across titles with different item formats. The function looks at titles that have different
 # item types, but focuses on titles with holds where one or more call numbers have visible copies but 0 holds compared
 # to other call number siblings.
@@ -407,49 +409,33 @@ sub audit_formats( $ )
 }
 
 # Orphaned holds; holds for titles that are not multi-volume titles, but have callnumbers with variances in holds counts relative to the title.
-# param:  <none>
+# param:  Name of the master list of titles with holds.
+#         ckey    sq  flex        holds call number   visible copies on call num
+#         1000047|38|epl000001937|1|Easy readers T PBK|0
 # return: <none>
 sub audit_orphans( $ )
 {
 	my $master_list = shift;
-	my $results = `cat "$master_list" | "$PIPE" -d'c0'`;
-	my $cat_keys = create_tmp_file( "audithold_o_deduped_master", $results );
-	my $differences = '';
-	# Test if the file exists because sometimes theres just aren't any orphaned holds.
-	if ( -s $cat_keys )
-	{
-		# To get the holds on a title do this:
-		# 1413866|3|
-		$results = `cat "$cat_keys" | selcatalog -iC -oCh 2>/dev/null`;
-		my $hold_title_counts = create_tmp_file( "audithold_o_active_NA_title_holds", $results );
-		# This will select all the items under a cat key with holds and count the holds on each item.
-		# 1413866|1|
-		# Do another selection but this time we want the holds on call numbers. We will compare that with the count on the title.
-		$results = `cat "$cat_keys" | selhold -iC -a'N' -t'T' -j"ACTIVE" -oI 2>/dev/null | "$PIPE" -d'c0' -A -P | "$PIPE" -o'c1,c0' -P`;
-		my $hold_item_counts = create_tmp_file( "audithold_o_active_NA_call_num_holds", $results );
-		# Now diff the two files and merge the hold counts.
-		$results = `echo "$hold_title_counts not $hold_item_counts" | "$DIFF" -e'c0,c1' -f'c0,c1'`;
-	}
-	$differences = create_tmp_file( "audithold_o_diff_title_callnum_hold_counts", $results );
-	# Now weed out the items that are intransit, they create a false positive result.# But we don't want in transit items because they produce false positives.
-	$results = `cat "$differences" | selitem -iN -oBmN 2>/dev/null`;
-	my $items_list = create_tmp_file( "audithold_o_items_from_titles", $results );
+	# Let's get the number of holds on each cat key. From a list like '1000047|38|epl000001937|1|Easy readers T PBK|0' use:
+	my $results = `cat "$master_list" | pipe.pl -d'c0' -o'c0,c3' -P`;
+	my $hold_title_counts = create_tmp_file( "audithold_o_active_NA_title_holds", $results );
+	# This will select all the items under a cat key with holds and count the holds on each item.
+	# 1413866|1|
+	# Do another selection but this time we want the holds on call numbers. We will compare that with the count on the title.
+	$results = `cat "$hold_title_counts" | selhold -iC -a'N' -t'T' -j"ACTIVE" -oC 2>/dev/null | "$PIPE" -d'c0' -A -P | "$PIPE" -o'c1,c0' -P`;
+	my $hold_item_counts = create_tmp_file( "audithold_o_active_NA_call_num_holds", $results );
+	# Now diff the two files and merge the hold counts.
+	$results = `echo "$hold_title_counts not $hold_item_counts" | "$DIFF" -e'c0,c1' -f'c0,c1'`;
+	my $differences = create_tmp_file( "audithold_o_diff_title_callnum_hold_counts", $results );
 	my $items_hash_ref = {};
-	# Expected result is '31221101011349|DISCARD|1000066|36|'.
-	if ( -s $items_list )
-	{
-		my @key_indexes    = (2,3);
-		my @value_indexes  = (0);
-		$items_hash_ref    = read_file_into_hash_reference( $items_list, \@key_indexes, \@value_indexes );
-		# $items_hash_ref->{'31221101011349|DISCARD|'} = '1000066|'
-		# Now using enlist to make lists of items for each call num key.
-		$items_hash_ref = enlist_values( $items_hash_ref );
-	}
-	# 1000044|60|Easy readers M PBK|0|epl000001934|
-	# 1525250|20|DVD MID|1|a1525250|
-	# But sometimes there are no problems so...
+	my $items_list = '';
+	# Now weed out the items that are intransit, they create a false positive results.
 	if ( -s $differences )
 	{
+		$results    = `cat "$differences" | selitem -iC -m'~INTRANSIT' -oBmN 2>/dev/null`;
+		$items_list = create_tmp_file( "audithold_o_items_not_INTRANSIT", $results );
+		# Expected result is '31221101011349|DISCARD|1000066|36|'.
+		$items_hash_ref = get_items( $differences ) if ( -s $items_list );
 		$results = `cat "$differences" | selcallnum -iC -oCNDz 2>/dev/null | selcatalog -iC -oSF 2>/dev/null | "$PIPE" -d'c0,c2' -t'c4' -P`;
 	}
 	else
@@ -574,7 +560,7 @@ sub init
 
 init();
 audit_formats( $MASTER_LIST ) if ( $opt{'f'} );
-# audit_orphans( $MASTER_LIST ) if ( $opt{'o'} );
+audit_orphans( $MASTER_LIST ) if ( $opt{'o'} );
 # audit_volumes( $MASTER_LIST ) if ( $opt{'v'} );
 if ( $opt{'t'} )
 {
